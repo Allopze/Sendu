@@ -9,15 +9,22 @@
     "dev:frontend": "cd frontend && npm run dev",
     "cleanup": "node scripts/cleanup.js",
     "build:frontend": "cd frontend && npm run build",
-    "postinstall": "cd frontend && npm install"
+    "postinstall": "cd frontend && npm install",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "concurrently": "^9.1.2",
+    "supertest": "^7.1.4",
+    "vitest": "^4.0.14"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
     "better-sqlite3": "^12.5.0",
     "better-sqlite3-session-store": "^0.1.0",
+    "compression": "^1.8.1",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
@@ -26,6 +33,8 @@
     "helmet": "^8.1.0",
     "multer": "^2.0.2",
     "nodemailer": "^7.0.11",
-    "uuid": "^13.0.0"
+    "uuid": "^13.0.0",
+    "winston": "^3.18.3",
+    "winston-daily-rotate-file": "^5.0.0"
   }
 }

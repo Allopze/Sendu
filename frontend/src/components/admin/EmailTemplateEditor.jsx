@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Code, Eye, Plus, X, Copy, Save, RotateCcw, FileText } from 'lucide-react';
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_VARIABLES } from '../../templates/email';
+import ConfirmModal from '../ui/ConfirmModal';
 
 const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
     const [selectedTemplate, setSelectedTemplate] = useState('fileShared');
@@ -10,6 +11,7 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
     const [newVarKey, setNewVarKey] = useState('');
     const [newVarDesc, setNewVarDesc] = useState('');
     const [saving, setSaving] = useState(false);
+    const [resetModalOpen, setResetModalOpen] = useState(false);
 
     useEffect(() => {
         // Initialize with saved templates or defaults
@@ -70,12 +72,15 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
     };
 
     const resetTemplate = () => {
-        if (confirm('¿Restablecer esta plantilla a los valores por defecto?')) {
-            setEditedTemplates(prev => ({
-                ...prev,
-                [selectedTemplate]: DEFAULT_EMAIL_TEMPLATES[selectedTemplate]
-            }));
-        }
+        setResetModalOpen(true);
+    };
+
+    const confirmResetTemplate = () => {
+        setEditedTemplates(prev => ({
+            ...prev,
+            [selectedTemplate]: DEFAULT_EMAIL_TEMPLATES[selectedTemplate]
+        }));
+        setResetModalOpen(false);
     };
 
     const handleSave = async () => {
@@ -285,6 +290,17 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
                     Guardar Plantillas
                 </button>
             </div>
+
+            {/* Modal de confirmación para restablecer plantilla */}
+            <ConfirmModal
+                isOpen={resetModalOpen}
+                onClose={() => setResetModalOpen(false)}
+                onConfirm={confirmResetTemplate}
+                title="Restablecer plantilla"
+                message="¿Estás seguro de que deseas restablecer esta plantilla a los valores por defecto? Se perderán todos los cambios realizados."
+                confirmText="Restablecer"
+                variant="warning"
+            />
         </div>
     );
 };

@@ -25,7 +25,7 @@ const FileCard = ({ file, onDelete }) => {
                         <Download size={18} />
                     </Link>
                     <button
-                        onClick={() => onDelete(file.id)}
+                        onClick={() => onDelete(file.id, file.originalName)}
                         className="p-2 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-xl text-gray-500 hover:text-red-600 transition-colors"
                         title="Delete File"
                     >

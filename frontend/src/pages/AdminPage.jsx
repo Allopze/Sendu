@@ -4,6 +4,7 @@ import StatsCards from '../components/dashboard/StatsCards';
 import { Loader2, Trash2, Users, FileText, Settings, Upload, X, Sun, Moon, Image, Mail, Send, HardDrive, FileCode, Shield, Key, Edit2, Check, CheckCircle, XCircle, RefreshCw } from 'lucide-react';
 import Toast from '../components/ui/Toast';
 import Tooltip from '../components/ui/Tooltip';
+import ConfirmModal from '../components/ui/ConfirmModal';
 import { useBranding } from '../context/BrandingContext';
 import EmailTemplateEditor from '../components/admin/EmailTemplateEditor';
 
@@ -33,6 +34,10 @@ const AdminPage = () => {
     const [uploading, setUploading] = useState({});
     const [testingEmail, setTestingEmail] = useState(false);
     const [testEmail, setTestEmail] = useState('');
+    
+    // Confirmation modal state
+    const [deleteUserModal, setDeleteUserModal] = useState({ isOpen: false, userId: null, username: '' });
+    const [deleteFileModal, setDeleteFileModal] = useState({ isOpen: false, fileId: null, fileName: '' });
     
     // User management state
     const [editingUser, setEditingUser] = useState(null);
@@ -106,7 +111,6 @@ const AdminPage = () => {
     };
 
     const handleDeleteUser = async (userId) => {
-        if (!confirm('¿Eliminar este usuario y todos sus archivos?')) return;
         try {
             const res = await apiClient.deleteUser(userId);
             if (res.ok) {
@@ -120,6 +124,12 @@ const AdminPage = () => {
         } catch (err) {
             setToast({ message: 'Error al eliminar usuario', type: 'error' });
         }
+        setUserMenuOpen(null);
+        setDeleteUserModal({ isOpen: false, userId: null, username: '' });
+    };
+
+    const openDeleteUserModal = (user) => {
+        setDeleteUserModal({ isOpen: true, userId: user.id, username: user.username });
         setUserMenuOpen(null);
     };
 
@@ -276,11 +286,18 @@ const AdminPage = () => {
     };
 
     const handleDeleteFile = async (id) => {
-        if (confirm('¿Eliminar archivo?')) {
+        try {
             await apiClient.deleteFile(id);
             fetchData();
             setToast({ message: 'Archivo eliminado', type: 'success' });
+        } catch (err) {
+            setToast({ message: 'Error al eliminar archivo', type: 'error' });
         }
+        setDeleteFileModal({ isOpen: false, fileId: null, fileName: '' });
+    };
+
+    const openDeleteFileModal = (file) => {
+        setDeleteFileModal({ isOpen: true, fileId: file.id, fileName: file.originalName });
     };
 
     if (loading) return <div className="flex justify-center p-20"><Loader2 className="animate-spin" /></div>;
@@ -436,7 +453,7 @@ const AdminPage = () => {
                                                             </button>
                                                         </Tooltip>
                                                         <Tooltip text="Eliminar">
-                                                            <button onClick={() => handleDeleteUser(user.id)} className="p-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 text-gray-400 hover:text-red-500">
+                                                            <button onClick={() => openDeleteUserModal(user)} className="p-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 text-gray-400 hover:text-red-500">
                                                                 <Trash2 size={15} />
                                                             </button>
                                                         </Tooltip>
@@ -477,7 +494,7 @@ const AdminPage = () => {
                                             <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{(file.size / 1024 / 1024).toFixed(2)} MB</td>
                                             <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{file.downloadCount}</td>
                                             <td className="px-4 py-3">
-                                                <button onClick={() => handleDeleteFile(file.id)} className="p-2 rounded-lg text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors">
+                                                <button onClick={() => openDeleteFileModal(file)} className="p-2 rounded-lg text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors">
                                                     <Trash2 size={16} />
                                                 </button>
                                             </td>
@@ -846,6 +863,28 @@ const AdminPage = () => {
                     </div>
                 </div>
             </div>
+
+            {/* Modal de confirmación para eliminar usuario */}
+            <ConfirmModal
+                isOpen={deleteUserModal.isOpen}
+                onClose={() => setDeleteUserModal({ isOpen: false, userId: null, username: '' })}
+                onConfirm={() => handleDeleteUser(deleteUserModal.userId)}
+                title="Eliminar usuario"
+                message={`¿Estás seguro de que deseas eliminar al usuario "${deleteUserModal.username}" y todos sus archivos? Esta acción no se puede deshacer.`}
+                confirmText="Eliminar"
+                variant="danger"
+            />
+
+            {/* Modal de confirmación para eliminar archivo */}
+            <ConfirmModal
+                isOpen={deleteFileModal.isOpen}
+                onClose={() => setDeleteFileModal({ isOpen: false, fileId: null, fileName: '' })}
+                onConfirm={() => handleDeleteFile(deleteFileModal.fileId)}
+                title="Eliminar archivo"
+                message={`¿Estás seguro de que deseas eliminar "${deleteFileModal.fileName}"?`}
+                confirmText="Eliminar"
+                variant="danger"
+            />
         </>
     );
 };

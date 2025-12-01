@@ -2,12 +2,14 @@ import { useState, useEffect } from 'react';
 import apiClient from '../api/client';
 import FileList from '../components/dashboard/FileList';
 import StatsCards from '../components/dashboard/StatsCards';
+import ConfirmModal from '../components/ui/ConfirmModal';
 import { Loader2 } from 'lucide-react';
 
 const DashboardPage = () => {
     const [files, setFiles] = useState([]);
     const [loading, setLoading] = useState(true);
     const [stats, setStats] = useState({ fileCount: 0, totalSize: 0, totalDownloads: 0 });
+    const [deleteModal, setDeleteModal] = useState({ isOpen: false, fileId: null, fileName: '' });
 
     useEffect(() => {
         fetchData();
@@ -32,11 +34,14 @@ const DashboardPage = () => {
         }
     };
 
-    const handleDelete = async (id) => {
-        if (confirm('¿Estás seguro de que quieres eliminar este archivo?')) {
-            await apiClient.deleteFile(id);
-            fetchData(); // Refresh
-        }
+    const handleDelete = (id, fileName) => {
+        setDeleteModal({ isOpen: true, fileId: id, fileName });
+    };
+
+    const confirmDelete = async () => {
+        await apiClient.deleteFile(deleteModal.fileId);
+        setDeleteModal({ isOpen: false, fileId: null, fileName: '' });
+        fetchData(); // Refresh
     };
 
     if (loading) {
@@ -53,6 +58,16 @@ const DashboardPage = () => {
             <StatsCards stats={stats} />
             <h2 className="text-xl font-bold mb-4">Tus Archivos</h2>
             <FileList files={files} onDelete={handleDelete} />
+            
+            <ConfirmModal
+                isOpen={deleteModal.isOpen}
+                onClose={() => setDeleteModal({ isOpen: false, fileId: null, fileName: '' })}
+                onConfirm={confirmDelete}
+                title="¿Eliminar archivo?"
+                message={`¿Estás seguro de que quieres eliminar "${deleteModal.fileName}"? Esta acción no se puede deshacer.`}
+                confirmText="Eliminar"
+                variant="danger"
+            />
         </div>
     );
 };

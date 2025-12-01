@@ -5,6 +5,8 @@ import SqliteStore from 'better-sqlite3-session-store';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import cors from 'cors';
+import compression from 'compression';
+import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -14,6 +16,9 @@ import { v4 as uuidv4 } from 'uuid';
 import nodemailer from 'nodemailer';
 import multer from 'multer';
 import { DEFAULT_EMAIL_TEMPLATES } from './templates/email/index.js';
+import logger, { httpLogger } from './lib/logger.js';
+import { csrfProtection } from './lib/csrf.js';
+import { encrypt, decrypt, isEncrypted } from './lib/encryption.js';
 
 dotenv.config();
 
@@ -41,6 +46,8 @@ const sessionDb = new Database(sessionDbPath);
 
 // Middleware
 app.use(helmet());
+app.use(compression()); // Gzip compression for responses
+app.use(cookieParser()); // Required for CSRF
 app.use(cors({
     origin: process.env.NODE_ENV === 'production' 
         ? process.env.PUBLIC_ORIGIN 
@@ -49,12 +56,16 @@ app.use(cors({
             'http://localhost:5174',
             'http://localhost:2000',
             'http://localhost:2001',
+            'http://localhost:2002',
             'http://localhost:3000'
           ],
     credentials: true
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// HTTP Request Logging
+app.use(httpLogger);
 
 // Session Middleware
 app.use(session({
@@ -76,28 +87,56 @@ app.use(session({
     }
 }));
 
-// Rate Limiting
+// Rate Limiting - General API
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 100 // limit each IP to 100 requests per windowMs
 });
 app.use('/api/', limiter);
 
+// Rate Limiting - Strict for auth endpoints (brute force protection)
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 5, // limit each IP to 5 login attempts per windowMs
+    message: { error: 'Demasiados intentos de inicio de sesión. Intenta de nuevo en 15 minutos.' },
+    standardHeaders: true,
+    legacyHeaders: false
+});
+
+// Rate Limiting - For password reset (prevent email bombing)
+const passwordResetLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 3, // limit each IP to 3 password reset requests per hour
+    message: { error: 'Demasiadas solicitudes de recuperación. Intenta de nuevo en 1 hora.' }
+});
+
 // Static Files (Production)
 if (process.env.NODE_ENV === 'production') {
     app.use(express.static(path.join(rootDir, 'frontend/dist')));
 }
 
-// Branding static files (logos, favicon)
+// Branding static files (logos, favicon) with cache headers
 const BRANDING_DIR = path.join(rootDir, 'branding');
 if (!fs.existsSync(BRANDING_DIR)) fs.mkdirSync(BRANDING_DIR, { recursive: true });
-app.use('/branding', express.static(BRANDING_DIR));
+app.use('/branding', express.static(BRANDING_DIR, {
+    maxAge: '1d', // Cache for 1 day
+    etag: true,
+    lastModified: true
+}));
 
-// Helper: Get SMTP config from settings
+// Helper: Get SMTP config from settings (with decryption for sensitive fields)
 const getSmtpConfig = () => {
     const settings = db.prepare('SELECT key, value FROM settings WHERE key LIKE ?').all('smtp%');
     const config = {};
-    settings.forEach(s => { config[s.key] = s.value; });
+    const sensitiveKeys = ['smtpPass'];
+    settings.forEach(s => { 
+        // Decrypt sensitive values
+        if (sensitiveKeys.includes(s.key) && isEncrypted(s.value)) {
+            config[s.key] = decrypt(s.value);
+        } else {
+            config[s.key] = s.value;
+        }
+    });
     return config;
 };
 
@@ -150,7 +189,7 @@ const sendEmail = async (to, subject, text, html = null) => {
     const transporter = createSmtpTransporter();
     
     if (!transporter) {
-        console.log(`[MOCK EMAIL] To: ${to}, Subject: ${subject}, Body: ${text}`);
+        logger.info('Email sent (mock mode)', { to, subject });
         return { success: true, mock: true };
     }
     
@@ -198,10 +237,42 @@ const sendTemplatedEmail = async (to, templateName, variables = {}) => {
     return sendEmail(to, subject, text, html);
 };
 
+// Validation helpers
+const isValidEmail = (email) => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+};
+
+const isValidUsername = (username) => {
+    // 3-30 characters, alphanumeric and underscores only
+    const usernameRegex = /^[a-zA-Z0-9_]{3,30}$/;
+    return usernameRegex.test(username);
+};
+
+const isValidPassword = (password) => {
+    // Minimum 8 characters, at least one letter and one number
+    return password && password.length >= 8 && /[a-zA-Z]/.test(password) && /[0-9]/.test(password);
+};
+
 // Auth Routes
 app.post('/api/auth/register', async (req, res) => {
     const { email, username, password } = req.body;
     if (!email || !username || !password) return res.status(400).json({ error: 'Faltan campos requeridos' });
+    
+    // Validate email format
+    if (!isValidEmail(email)) {
+        return res.status(400).json({ error: 'Formato de email inválido' });
+    }
+    
+    // Validate username format
+    if (!isValidUsername(username)) {
+        return res.status(400).json({ error: 'El nombre de usuario debe tener 3-30 caracteres alfanuméricos' });
+    }
+    
+    // Validate password strength
+    if (!isValidPassword(password)) {
+        return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres, incluyendo letras y números' });
+    }
 
     try {
         const hashedPassword = await bcrypt.hash(password, 10);
@@ -224,14 +295,19 @@ app.post('/api/auth/register', async (req, res) => {
         if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
             return res.status(409).json({ error: 'El email o nombre de usuario ya existe' });
         }
-        console.error(err);
+        logger.error('Error en registro', { error: err.message, stack: err.stack });
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authLimiter, async (req, res) => {
     const { login, password } = req.body; // login can be email or username
     if (!login || !password) return res.status(400).json({ error: 'Faltan campos requeridos' });
+    
+    // Basic input validation
+    if (login.length > 255 || password.length > 255) {
+        return res.status(400).json({ error: 'Datos de entrada inválidos' });
+    }
 
     try {
         const stmt = db.prepare('SELECT * FROM users WHERE email = ? OR username = ?');
@@ -244,7 +320,7 @@ app.post('/api/auth/login', async (req, res) => {
         req.session.userId = user.id;
         res.json({ message: 'Sesión iniciada correctamente', user: { id: user.id, username: user.username, email: user.email, role: user.role } });
     } catch (err) {
-        console.error(err);
+        logger.error('Error en login', { error: err.message });
         res.status(500).json({ error: 'Error interno del servidor' });
     }
 });
@@ -291,17 +367,21 @@ app.get('/api/auth/verify', (req, res) => {
         
         res.json({ message: 'Email verificado correctamente', success: true });
     } catch (err) {
-        console.error(err);
+        logger.error('Error', { error: err.message, stack: err.stack });
         res.status(500).json({ error: 'Error al verificar email' });
     }
 });
 
 // Request password reset
-app.post('/api/auth/forgot-password', async (req, res) => {
+app.post('/api/auth/forgot-password', passwordResetLimiter, async (req, res) => {
     const { email } = req.body;
     
     if (!email) {
         return res.status(400).json({ error: 'Email requerido' });
+    }
+    
+    if (!isValidEmail(email)) {
+        return res.status(400).json({ error: 'Formato de email inválido' });
     }
     
     try {
@@ -328,7 +408,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
         
         res.json({ message: 'Si el email existe, recibirás un enlace para restablecer tu contraseña' });
     } catch (err) {
-        console.error(err);
+        logger.error('Error', { error: err.message, stack: err.stack });
         res.status(500).json({ error: 'Error al procesar la solicitud' });
     }
 });
@@ -354,7 +434,7 @@ app.get('/api/auth/reset-password/validate', (req, res) => {
         
         res.json({ valid: true, username: user.username });
     } catch (err) {
-        console.error(err);
+        logger.error('Error', { error: err.message, stack: err.stack });
         res.status(500).json({ error: 'Error al validar token', valid: false });
     }
 });
@@ -388,7 +468,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
         
         res.json({ message: 'Contraseña actualizada correctamente', success: true });
     } catch (err) {
-        console.error(err);
+        logger.error('Error', { error: err.message, stack: err.stack });
         res.status(500).json({ error: 'Error al actualizar contraseña' });
     }
 });
@@ -422,7 +502,7 @@ app.post('/api/auth/resend-verification', async (req, res) => {
         
         res.json({ message: 'Email de verificación reenviado' });
     } catch (err) {
-        console.error(err);
+        logger.error('Error', { error: err.message, stack: err.stack });
         res.status(500).json({ error: 'Error al reenviar email de verificación' });
     }
 });
@@ -552,7 +632,7 @@ app.post('/api/upload/complete', async (req, res) => {
         res.json({ fileId: finalFileId, message: 'Subida completada' });
 
     } catch (err) {
-        console.error('Error al completar subida:', err);
+        logger.error('Error al completar subida', { error: err.message });
         // Clean up on error
         if (fs.existsSync(uploadPath)) {
             fs.rmSync(uploadPath, { recursive: true, force: true });
@@ -635,14 +715,32 @@ app.post('/api/download/:id', async (req, res) => {
     res.download(file.serverPath, file.originalName);
 });
 
-// User Files Route
+// User Files Route (with pagination)
 app.get('/api/user/files', (req, res) => {
     if (!req.session.userId) return res.status(401).json({ error: 'No autenticado' });
+    
+    // Pagination
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const offset = (page - 1) * limit;
+    
+    // Get total count
+    const countStmt = db.prepare('SELECT COUNT(*) as total FROM files WHERE userId = ?');
+    const { total } = countStmt.get(req.session.userId);
+    
+    // Get paginated files
+    const stmt = db.prepare('SELECT * FROM files WHERE userId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?');
+    const files = stmt.all(req.session.userId, limit, offset);
 
-    const stmt = db.prepare('SELECT * FROM files WHERE userId = ? ORDER BY createdAt DESC');
-    const files = stmt.all(req.session.userId);
-
-    res.json({ files });
+    res.json({ 
+        files,
+        pagination: {
+            page,
+            limit,
+            total,
+            totalPages: Math.ceil(total / limit)
+        }
+    });
 });
 
 app.delete('/api/files/:id', (req, res) => {
@@ -709,7 +807,7 @@ app.put('/api/admin/users/:id', requireAdmin, (req, res) => {
         if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
             return res.status(409).json({ error: 'Email o username ya existe' });
         }
-        console.error(err);
+        logger.error('Error', { error: err.message, stack: err.stack });
         res.status(500).json({ error: 'Error al actualizar usuario' });
     }
 });
@@ -737,7 +835,7 @@ app.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
         db.prepare('DELETE FROM users WHERE id = ?').run(id);
         res.json({ message: 'Usuario eliminado' });
     } catch (err) {
-        console.error(err);
+        logger.error('Error', { error: err.message, stack: err.stack });
         res.status(500).json({ error: 'Error al eliminar usuario' });
     }
 });
@@ -759,7 +857,7 @@ app.post('/api/admin/users/:id/toggle-role', requireAdmin, (req, res) => {
         db.prepare('UPDATE users SET role = ? WHERE id = ?').run(newRole, id);
         res.json({ message: 'Rol actualizado', role: newRole });
     } catch (err) {
-        console.error(err);
+        logger.error('Error', { error: err.message, stack: err.stack });
         res.status(500).json({ error: 'Error al cambiar rol' });
     }
 });
@@ -776,7 +874,7 @@ app.post('/api/admin/users/:id/toggle-verified', requireAdmin, (req, res) => {
         db.prepare('UPDATE users SET isVerified = ? WHERE id = ?').run(newVerified, id);
         res.json({ message: 'Estado de verificación actualizado', isVerified: newVerified });
     } catch (err) {
-        console.error(err);
+        logger.error('Error', { error: err.message, stack: err.stack });
         res.status(500).json({ error: 'Error al cambiar verificación' });
     }
 });
@@ -795,7 +893,7 @@ app.post('/api/admin/users/:id/reset-password', requireAdmin, async (req, res) =
         db.prepare('UPDATE users SET passwordHash = ? WHERE id = ?').run(hashedPassword, id);
         res.json({ message: 'Contraseña actualizada' });
     } catch (err) {
-        console.error(err);
+        logger.error('Error', { error: err.message, stack: err.stack });
         res.status(500).json({ error: 'Error al cambiar contraseña' });
     }
 });
@@ -826,7 +924,7 @@ app.post('/api/admin/users/:id/send-verification', requireAdmin, async (req, res
         
         res.json({ message: 'Email de verificación enviado' });
     } catch (err) {
-        console.error(err);
+        logger.error('Error', { error: err.message, stack: err.stack });
         res.status(500).json({ error: 'Error al enviar email de verificación' });
     }
 });
@@ -855,14 +953,32 @@ app.post('/api/admin/users/:id/send-reset', requireAdmin, async (req, res) => {
         
         res.json({ message: 'Email de reseteo de contraseña enviado' });
     } catch (err) {
-        console.error(err);
+        logger.error('Error', { error: err.message, stack: err.stack });
         res.status(500).json({ error: 'Error al enviar email de reseteo' });
     }
 });
 
 app.get('/api/admin/files', requireAdmin, (req, res) => {
-    const files = db.prepare('SELECT * FROM files ORDER BY createdAt DESC LIMIT 100').all();
-    res.json({ files });
+    // Pagination
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const offset = (page - 1) * limit;
+    
+    // Get total count
+    const { total } = db.prepare('SELECT COUNT(*) as total FROM files').get();
+    
+    // Get paginated files
+    const files = db.prepare('SELECT * FROM files ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(limit, offset);
+    
+    res.json({ 
+        files,
+        pagination: {
+            page,
+            limit,
+            total,
+            totalPages: Math.ceil(total / limit)
+        }
+    });
 });
 
 app.get('/api/admin/settings', requireAdmin, (req, res) => {
@@ -875,10 +991,15 @@ app.get('/api/admin/settings', requireAdmin, (req, res) => {
 app.post('/api/admin/settings', requireAdmin, (req, res) => {
     const settings = req.body;
     const stmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+    
+    // Keys that should be encrypted
+    const sensitiveKeys = ['smtpPass'];
 
     const insertMany = db.transaction((settings) => {
         for (const [key, value] of Object.entries(settings)) {
-            stmt.run(key, String(value));
+            // Encrypt sensitive values
+            const finalValue = sensitiveKeys.includes(key) && value ? encrypt(value) : String(value);
+            stmt.run(key, finalValue);
         }
     });
 
@@ -886,7 +1007,7 @@ app.post('/api/admin/settings', requireAdmin, (req, res) => {
         insertMany(settings);
         res.json({ message: 'Configuración actualizada' });
     } catch (err) {
-        console.error(err);
+        logger.error('Error al actualizar configuración', { error: err.message });
         res.status(500).json({ error: 'Error al actualizar configuración' });
     }
 });
@@ -977,7 +1098,7 @@ app.post('/api/admin/smtp/test', requireAdmin, async (req, res) => {
 
         res.json({ message: 'Email de prueba enviado correctamente', messageId: result.messageId });
     } catch (err) {
-        console.error('SMTP Test Error:', err);
+        logger.error('SMTP Test Error', { error: err.message });
         res.status(500).json({ error: `Error SMTP: ${err.message}` });
     }
 });
@@ -1017,8 +1138,8 @@ app.get('/api/settings/limits', (req, res) => {
 
 // Start Server
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    logger.info(`Server running on port ${PORT}`);
+    logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });
 
 // Database Initialization (Schema)
@@ -1077,9 +1198,50 @@ const initDb = () => {
     );
   `);
 
-    console.log('Database initialized');
+    logger.info('Database initialized');
 };
 
 initDb();
+
+// Automatic cleanup job - runs every hour
+const cleanupExpiredFiles = () => {
+    const now = Date.now();
+    
+    // Find expired files
+    const expiredFiles = db.prepare('SELECT * FROM files WHERE expiresAt IS NOT NULL AND expiresAt < ?').all(now);
+    
+    // Find files with max downloads reached
+    const maxDownloadFiles = db.prepare('SELECT * FROM files WHERE maxDownloads IS NOT NULL AND downloadCount >= maxDownloads').all();
+    
+    const filesToDelete = [...expiredFiles, ...maxDownloadFiles];
+    
+    // Remove duplicates
+    const uniqueFiles = filesToDelete.filter((file, index, self) =>
+        index === self.findIndex((t) => t.id === file.id)
+    );
+    
+    if (uniqueFiles.length === 0) return;
+    
+    logger.info(`Cleanup: Found ${uniqueFiles.length} expired files to delete`);
+    
+    for (const file of uniqueFiles) {
+        try {
+            if (fs.existsSync(file.serverPath)) {
+                fs.unlinkSync(file.serverPath);
+            }
+            db.prepare('DELETE FROM files WHERE id = ?').run(file.id);
+            logger.info(`Cleanup: Deleted file ${file.id} (${file.originalName})`);
+        } catch (err) {
+            logger.error('Cleanup error', { fileId: file.id, error: err.message });
+        }
+    }
+};
+
+// Run cleanup every hour
+const CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour
+setInterval(cleanupExpiredFiles, CLEANUP_INTERVAL);
+
+// Run cleanup on startup
+cleanupExpiredFiles();
 
 export { db };
