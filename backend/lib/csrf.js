@@ -65,8 +65,13 @@ export const csrfProtection = (options = {}) => {
     } = options;
     
     return (req, res, next) => {
+        const requestPath = req.path || req.originalUrl || '';
+        const isIgnoredPath = ignorePaths.some(path => 
+            requestPath.startsWith(path) || requestPath.startsWith(`/api${path}`)
+        );
+
         // Skip if path is in ignore list
-        if (ignorePaths.some(path => req.path.startsWith(path))) {
+        if (isIgnoredPath) {
             return next();
         }
         
@@ -79,6 +84,9 @@ export const csrfProtection = (options = {}) => {
         
         // For safe methods, just attach a new token to the response
         if (ignoreMethods.includes(req.method)) {
+            // Mark session as used so the session cookie is persisted along with the CSRF token
+            req.session.csrfIssuedAt = req.session.csrfIssuedAt || Date.now();
+            
             const token = generateToken(sessionId);
             res.cookie(cookieName, token, {
                 httpOnly: false, // Must be accessible by JS
