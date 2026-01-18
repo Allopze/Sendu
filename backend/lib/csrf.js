@@ -1,17 +1,38 @@
 import crypto from 'crypto';
+import { 
+    generateCsrfToken as generateTokenPersistent, 
+    validateCsrfToken as validateTokenPersistent 
+} from './persistentStores.js';
 
-// In-memory store for CSRF tokens (in production, use Redis or similar)
-const tokenStore = new Map();
+/**
+ * CSRF Token Store - Persistent using SQLite
+ * 
+ * Benefits over in-memory Map:
+ * - Tokens persist across server restarts
+ * - Works with multiple replicas (shared database)
+ * - Automatic expiration cleanup
+ */
 
-// Clean expired tokens every 15 minutes
+// Fallback in-memory store (used before persistent stores are initialized)
+const fallbackStore = new Map();
+let usePersistentStore = false;
+
+// Clean expired tokens from fallback store every 15 minutes
 setInterval(() => {
     const now = Date.now();
-    for (const [key, data] of tokenStore.entries()) {
+    for (const [key, data] of fallbackStore.entries()) {
         if (now > data.expires) {
-            tokenStore.delete(key);
+            fallbackStore.delete(key);
         }
     }
 }, 15 * 60 * 1000);
+
+/**
+ * Enable persistent storage (call after database is initialized)
+ */
+export const enablePersistentStorage = () => {
+    usePersistentStore = true;
+};
 
 /**
  * Generate a CSRF token for a session
@@ -19,10 +40,15 @@ setInterval(() => {
  * @returns {string} The CSRF token
  */
 export const generateToken = (sessionId) => {
+    if (usePersistentStore) {
+        return generateTokenPersistent(sessionId);
+    }
+    
+    // Fallback to in-memory
     const token = crypto.randomBytes(32).toString('hex');
     const expires = Date.now() + (60 * 60 * 1000); // 1 hour expiry
     
-    tokenStore.set(`${sessionId}:${token}`, {
+    fallbackStore.set(`${sessionId}:${token}`, {
         sessionId,
         expires
     });
@@ -37,18 +63,23 @@ export const generateToken = (sessionId) => {
  * @returns {boolean} Whether the token is valid
  */
 export const validateToken = (sessionId, token) => {
+    if (usePersistentStore) {
+        return validateTokenPersistent(sessionId, token);
+    }
+    
+    // Fallback to in-memory
     const key = `${sessionId}:${token}`;
-    const data = tokenStore.get(key);
+    const data = fallbackStore.get(key);
     
     if (!data) return false;
     if (Date.now() > data.expires) {
-        tokenStore.delete(key);
+        fallbackStore.delete(key);
         return false;
     }
     if (data.sessionId !== sessionId) return false;
     
     // Token is single-use - delete after validation
-    tokenStore.delete(key);
+    fallbackStore.delete(key);
     return true;
 };
 
@@ -82,18 +113,27 @@ export const csrfProtection = (options = {}) => {
         
         const sessionId = req.session.id || req.sessionID;
         
+        // Cookie options - must match session cookie settings for consistency
+        const isProduction = process.env.NODE_ENV === 'production';
+        const cookieSameSite = process.env.SESSION_COOKIE_SAMESITE || (isProduction ? 'lax' : 'lax');
+        const cookieSecure = process.env.SESSION_COOKIE_SECURE
+            ? process.env.SESSION_COOKIE_SECURE === 'true'
+            : isProduction;
+        
+        const csrfCookieOptions = {
+            httpOnly: false, // Must be accessible by JS
+            secure: cookieSecure,
+            sameSite: cookieSameSite, // Match session cookie SameSite
+            maxAge: 60 * 60 * 1000 // 1 hour
+        };
+        
         // For safe methods, just attach a new token to the response
         if (ignoreMethods.includes(req.method)) {
             // Mark session as used so the session cookie is persisted along with the CSRF token
             req.session.csrfIssuedAt = req.session.csrfIssuedAt || Date.now();
             
             const token = generateToken(sessionId);
-            res.cookie(cookieName, token, {
-                httpOnly: false, // Must be accessible by JS
-                secure: process.env.NODE_ENV === 'production',
-                sameSite: 'strict',
-                maxAge: 60 * 60 * 1000 // 1 hour
-            });
+            res.cookie(cookieName, token, csrfCookieOptions);
             req.csrfToken = () => token;
             return next();
         }
@@ -111,12 +151,7 @@ export const csrfProtection = (options = {}) => {
         
         // Generate new token for next request
         const newToken = generateToken(sessionId);
-        res.cookie(cookieName, newToken, {
-            httpOnly: false,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'strict',
-            maxAge: 60 * 60 * 1000
-        });
+        res.cookie(cookieName, newToken, csrfCookieOptions);
         req.csrfToken = () => newToken;
         
         next();

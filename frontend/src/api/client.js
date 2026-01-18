@@ -1,72 +1,103 @@
-const API_BASE = '/api';
+const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '');
+const UPLOAD_API_BASE = (import.meta.env.VITE_UPLOAD_API_BASE || API_BASE).replace(/\/$/, '');
+
+// Helper to get CSRF token from cookie
+const getCsrfToken = () => {
+    const match = document.cookie.match(/csrf-token=([^;]+)/);
+    return match ? match[1] : null;
+};
+
+// Helper for requests that need CSRF token
+const fetchWithCsrf = (url, options = {}) => {
+    const csrfToken = getCsrfToken();
+    const headers = {
+        ...options.headers,
+    };
+    
+    // Add CSRF token for state-changing requests
+    if (csrfToken && !['GET', 'HEAD', 'OPTIONS'].includes(options.method?.toUpperCase())) {
+        headers['x-csrf-token'] = csrfToken;
+    }
+    
+    return fetch(url, {
+        ...options,
+        headers,
+        credentials: 'include'
+    });
+};
 
 const apiClient = {
     // Auth
-    login: (data) => fetch(`${API_BASE}/auth/login`, {
+    login: (data) => fetchWithCsrf(`${API_BASE}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify(data)
     }),
-    logout: () => fetch(`${API_BASE}/auth/logout`, { method: 'POST', credentials: 'include' }),
-    register: (data) => fetch(`${API_BASE}/auth/register`, {
+    logout: () => fetchWithCsrf(`${API_BASE}/auth/logout`, { method: 'POST' }),
+    register: (data) => fetchWithCsrf(`${API_BASE}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify(data)
     }),
     me: () => fetch(`${API_BASE}/auth/me`, { credentials: 'include' }),
     
     // Email verification
     verifyEmail: (token) => fetch(`${API_BASE}/auth/verify?token=${token}`, { credentials: 'include' }),
-    resendVerification: () => fetch(`${API_BASE}/auth/resend-verification`, {
-        method: 'POST',
-        credentials: 'include'
+    resendVerification: () => fetchWithCsrf(`${API_BASE}/auth/resend-verification`, {
+        method: 'POST'
     }),
     
     // Password reset
-    forgotPassword: (email) => fetch(`${API_BASE}/auth/forgot-password`, {
+    forgotPassword: (email) => fetchWithCsrf(`${API_BASE}/auth/forgot-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email })
     }),
     validateResetToken: (token) => fetch(`${API_BASE}/auth/reset-password/validate?token=${token}`),
-    resetPassword: (token, password) => fetch(`${API_BASE}/auth/reset-password`, {
+    resetPassword: (token, password) => fetchWithCsrf(`${API_BASE}/auth/reset-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token, password })
     }),
 
     // Files
-    initUpload: (data) => fetch(`${API_BASE}/upload/init`, {
+    initUpload: (data) => fetchWithCsrf(`${UPLOAD_API_BASE}/upload/init`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify(data)
     }),
-    uploadChunk: (uploadId, index, chunk) => {
+    uploadChunk: (uploadId, index, chunk, signal) => {
         const formData = new FormData();
         formData.append('chunk', chunk);
-        return fetch(`${API_BASE}/upload/chunk?uploadId=${uploadId}&index=${index}`, {
+        return fetch(`${UPLOAD_API_BASE}/upload/chunk?uploadId=${uploadId}&index=${index}`, {
             method: 'POST',
             credentials: 'include',
-            body: formData
+            body: formData,
+            signal
         });
     },
-    completeUpload: (uploadId) => fetch(`${API_BASE}/upload/complete`, {
+    completeUpload: (uploadId) => fetchWithCsrf(`${UPLOAD_API_BASE}/upload/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
+        body: JSON.stringify({ uploadId })
+    }),
+    cancelUpload: (uploadId) => fetchWithCsrf(`${UPLOAD_API_BASE}/upload/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ uploadId })
     }),
     getFileMeta: (id) => fetch(`${API_BASE}/meta/${id}`, { credentials: 'include' }),
-    downloadFile: (id, password) => fetch(`${API_BASE}/download/${id}`, {
+    validateDownload: (id, password) => fetchWithCsrf(`${API_BASE}/download/${id}/validate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify({ password })
     }),
-    deleteFile: (id) => fetch(`${API_BASE}/files/${id}`, { method: 'DELETE', credentials: 'include' }),
+    downloadFile: (id, password) => fetchWithCsrf(`${API_BASE}/download/${id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password })
+    }),
+    deleteFile: (id) => fetchWithCsrf(`${API_BASE}/files/${id}`, { method: 'DELETE' }),
     getUserFiles: () => fetch(`${API_BASE}/user/files`, { credentials: 'include' }),
 
     // Admin
@@ -74,68 +105,71 @@ const apiClient = {
     getAdminUsers: () => fetch(`${API_BASE}/admin/users`, { credentials: 'include' }),
     getAdminFiles: () => fetch(`${API_BASE}/admin/files`, { credentials: 'include' }),
     getAdminSettings: () => fetch(`${API_BASE}/admin/settings`, { credentials: 'include' }),
-    updateAdminSettings: (data) => fetch(`${API_BASE}/admin/settings`, {
+    updateAdminSettings: (data) => fetchWithCsrf(`${API_BASE}/admin/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify(data)
     }),
     // User management
-    updateUser: (id, data) => fetch(`${API_BASE}/admin/users/${id}`, {
+    updateUser: (id, data) => fetchWithCsrf(`${API_BASE}/admin/users/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify(data)
     }),
-    deleteUser: (id) => fetch(`${API_BASE}/admin/users/${id}`, {
-        method: 'DELETE',
-        credentials: 'include'
+    deleteUser: (id) => fetchWithCsrf(`${API_BASE}/admin/users/${id}`, {
+        method: 'DELETE'
     }),
-    toggleUserRole: (id) => fetch(`${API_BASE}/admin/users/${id}/toggle-role`, {
-        method: 'POST',
-        credentials: 'include'
+    toggleUserRole: (id) => fetchWithCsrf(`${API_BASE}/admin/users/${id}/toggle-role`, {
+        method: 'POST'
     }),
-    toggleUserVerified: (id) => fetch(`${API_BASE}/admin/users/${id}/toggle-verified`, {
-        method: 'POST',
-        credentials: 'include'
+    toggleUserVerified: (id) => fetchWithCsrf(`${API_BASE}/admin/users/${id}/toggle-verified`, {
+        method: 'POST'
     }),
-    resetUserPassword: (id, password) => fetch(`${API_BASE}/admin/users/${id}/reset-password`, {
+    resetUserPassword: (id, password) => fetchWithCsrf(`${API_BASE}/admin/users/${id}/reset-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify({ password })
     }),
-    sendUserVerification: (id) => fetch(`${API_BASE}/admin/users/${id}/send-verification`, {
-        method: 'POST',
-        credentials: 'include'
+    sendUserVerification: (id) => fetchWithCsrf(`${API_BASE}/admin/users/${id}/send-verification`, {
+        method: 'POST'
     }),
-    sendUserPasswordReset: (id) => fetch(`${API_BASE}/admin/users/${id}/send-reset`, {
-        method: 'POST',
-        credentials: 'include'
+    sendUserPasswordReset: (id) => fetchWithCsrf(`${API_BASE}/admin/users/${id}/send-reset`, {
+        method: 'POST'
     }),
     uploadBranding: (type, file) => {
         const formData = new FormData();
         formData.append('file', file);
+        const csrfToken = getCsrfToken();
         return fetch(`${API_BASE}/admin/branding/upload?type=${type}`, {
             method: 'POST',
             credentials: 'include',
+            headers: csrfToken ? { 'x-csrf-token': csrfToken } : {},
             body: formData
         });
     },
-    deleteBranding: (type) => fetch(`${API_BASE}/admin/branding/${type}`, {
-        method: 'DELETE',
-        credentials: 'include'
+    deleteBranding: (type) => fetchWithCsrf(`${API_BASE}/admin/branding/${type}`, {
+        method: 'DELETE'
     }),
-    testEmail: (email) => fetch(`${API_BASE}/admin/smtp/test`, {
+    testEmail: (email) => fetchWithCsrf(`${API_BASE}/admin/smtp/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify({ email })
+    }),
+    cleanupChunks: (maxAgeHours = 1) => fetchWithCsrf(`${API_BASE}/admin/cleanup-chunks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ maxAgeHours })
+    }),
+    resetRateLimits: (prefix = 'all') => fetchWithCsrf(`${API_BASE}/admin/rate-limits/reset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prefix })
     }),
 
     // Public
     getPublicSettings: () => fetch(`${API_BASE}/settings/public`),
-    getUploadLimits: () => fetch(`${API_BASE}/settings/limits`),
+    getUploadLimits: () => fetch(`${API_BASE}/settings/limits`, { credentials: 'include' }),
 };
 
+export { API_BASE, UPLOAD_API_BASE };
 export default apiClient;

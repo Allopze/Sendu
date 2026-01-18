@@ -3,15 +3,43 @@ import apiClient from '../api/client';
 
 const BrandingContext = createContext(null);
 
+const BRANDING_STORAGE_KEY = 'sendu_branding';
+
+// Obtener branding guardado en localStorage para evitar flash
+const getSavedBranding = () => {
+    try {
+        const saved = localStorage.getItem(BRANDING_STORAGE_KEY);
+        if (saved) {
+            return JSON.parse(saved);
+        }
+    } catch {
+        // Ignore errors
+    }
+    return null;
+};
+
+// Guardar branding en localStorage
+const saveBranding = (settings) => {
+    try {
+        localStorage.setItem(BRANDING_STORAGE_KEY, JSON.stringify(settings));
+    } catch {
+        // Ignore errors
+    }
+};
+
+const defaultSettings = {
+    logoLight: '',
+    logoDark: '',
+    favicon: '',
+    dropzoneIcon: '',
+    footerText: ''
+};
+
 export const BrandingProvider = ({ children }) => {
-    const [settings, setSettings] = useState({
-        showName: 'true',
-        logoLight: '',
-        logoDark: '',
-        favicon: '',
-        footerText: ''
-    });
-    const [loading, setLoading] = useState(true);
+    // Usar branding guardado como estado inicial para evitar flash
+    const savedBranding = getSavedBranding();
+    const [settings, setSettings] = useState(savedBranding || defaultSettings);
+    const [loading, setLoading] = useState(!savedBranding); // No loading si hay datos guardados
 
     const fetchSettings = useCallback(async () => {
         try {
@@ -19,6 +47,7 @@ export const BrandingProvider = ({ children }) => {
             if (res.ok) {
                 const data = await res.json();
                 setSettings(data);
+                saveBranding(data); // Guardar para la próxima vez
                 
                 // Update favicon dynamically
                 if (data.favicon) {
@@ -41,7 +70,11 @@ export const BrandingProvider = ({ children }) => {
 
     // Allow components to update settings locally (for immediate UI feedback)
     const updateSettings = useCallback((newSettings) => {
-        setSettings(prev => ({ ...prev, ...newSettings }));
+        setSettings(prev => {
+            const updated = { ...prev, ...newSettings };
+            saveBranding(updated); // También guardar actualizaciones locales
+            return updated;
+        });
         
         // Update favicon if changed
         if (newSettings.favicon !== undefined) {

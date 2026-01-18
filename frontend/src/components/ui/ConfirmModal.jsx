@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
+import { useTheme } from '../../context/ThemeContext';
 
 /**
  * ConfirmModal - Modal de confirmación reutilizable
@@ -23,6 +24,7 @@ const ConfirmModal = ({
     cancelText = 'Cancelar',
     variant = 'danger'
 }) => {
+    const { isDark } = useTheme();
     const modalRef = useRef(null);
 
     // Close on escape key
@@ -47,14 +49,14 @@ const ConfirmModal = ({
 
     const variantStyles = {
         danger: 'bg-red-600 hover:bg-red-700 focus:ring-red-500',
-        warning: 'bg-yellow-600 hover:bg-yellow-700 focus:ring-yellow-500',
-        primary: 'bg-primary-600 hover:bg-primary-700 focus:ring-primary-500'
+        warning: 'bg-amber-600 hover:bg-amber-700 focus:ring-amber-500',
+        primary: 'bg-red-600 hover:bg-red-700 focus:ring-red-500'
     };
 
     const iconColors = {
-        danger: 'text-red-600 bg-red-100 dark:bg-red-900/30',
-        warning: 'text-yellow-600 bg-yellow-100 dark:bg-yellow-900/30',
-        primary: 'text-primary-600 bg-primary-100 dark:bg-primary-900/30'
+        danger: isDark ? 'text-red-400 bg-red-500/20' : 'text-red-600 bg-red-100',
+        warning: isDark ? 'text-amber-400 bg-amber-500/20' : 'text-amber-600 bg-amber-100',
+        primary: isDark ? 'text-red-400 bg-red-500/20' : 'text-red-600 bg-red-100'
     };
 
     const handleConfirm = () => {
@@ -64,13 +66,15 @@ const ConfirmModal = ({
 
     return (
         <div 
-            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-enter"
             onClick={onClose}
         >
             <div 
                 ref={modalRef}
                 tabIndex={-1}
-                className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl max-w-md w-full p-6 transform transition-all"
+                className={`rounded-3xl shadow-2xl max-w-md w-full p-6 transform transition-all ${
+                    isDark ? 'bg-[#1a1a1a] border border-white/10' : 'bg-white border border-zinc-100'
+                }`}
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* Header */}
@@ -78,17 +82,19 @@ const ConfirmModal = ({
                     <div className={`p-3 rounded-full ${iconColors[variant]}`}>
                         <AlertTriangle size={24} />
                     </div>
-                    <div className="flex-1">
-                        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                    <div className="flex-1 min-w-0">
+                        <h3 className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-zinc-900'}`}>
                             {title}
                         </h3>
-                        <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                        <p className={`mt-2 text-sm break-words overflow-hidden ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>
                             {message}
                         </p>
                     </div>
                     <button
                         onClick={onClose}
-                        className="p-1 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                        className={`p-1 rounded-lg transition-colors ${
+                            isDark ? 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100'
+                        }`}
                     >
                         <X size={20} />
                     </button>
@@ -98,7 +104,9 @@ const ConfirmModal = ({
                 <div className="mt-6 flex gap-3 justify-end">
                     <button
                         onClick={onClose}
-                        className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-xl hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                        className={`px-4 py-2 text-sm font-medium rounded-xl transition-colors ${
+                            isDark ? 'text-zinc-300 bg-zinc-800 hover:bg-zinc-700' : 'text-zinc-700 bg-zinc-100 hover:bg-zinc-200'
+                        }`}
                     >
                         {cancelText}
                     </button>

@@ -23,13 +23,13 @@ export const wrapInBaseTemplate = (content) => `<!DOCTYPE html>
 <body>
     <div class="container">
         <div class="header">
-            <img src="{{logoUrl}}" alt="{{appName}}" />
+            {{#if logoUrl}}<img src="{{logoUrl}}" alt="{{appName}}" />{{else}}<h1 style="margin: 0; font-size: 24px;">{{appName}}</h1>{{/if}}
         </div>
         <div class="content">
             ${content}
         </div>
         <div class="footer">
-            <p>{{appName}} - {{appUrl}}</p>
+            <p>{{appName}} - <a href="{{appUrl}}" style="color: #fd3f31;">{{appUrl}}</a></p>
         </div>
     </div>
 </body>

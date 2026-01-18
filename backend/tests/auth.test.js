@@ -1,128 +1,36 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import request from 'supertest';
-import express from 'express';
-import session from 'express-session';
-import Database from 'better-sqlite3';
-import bcrypt from 'bcrypt';
+import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 
+process.env.NODE_ENV = 'test';
+process.env.ALLOW_PUBLIC_REGISTRATION = 'true';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Test database setup
-const testDbPath = path.join(__dirname, '..', 'test.sqlite');
+const testDbPath = path.join(__dirname, '..', '..', 'data', 'test.sqlite');
 let db;
 let app;
-
-// Create a minimal test app
-const createTestApp = () => {
-    const testApp = express();
-    testApp.use(express.json());
-    testApp.use(session({
-        secret: 'test-secret',
-        resave: false,
-        saveUninitialized: false,
-        cookie: { secure: false }
-    }));
-
-    // Validation helpers (same as server.js)
-    const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-    const isValidUsername = (username) => /^[a-zA-Z0-9_]{3,30}$/.test(username);
-    const isValidPassword = (password) => password && password.length >= 8 && /[a-zA-Z]/.test(password) && /[0-9]/.test(password);
-
-    // Register endpoint
-    testApp.post('/api/auth/register', async (req, res) => {
-        const { email, username, password } = req.body;
-        if (!email || !username || !password) {
-            return res.status(400).json({ error: 'Faltan campos requeridos' });
-        }
-        if (!isValidEmail(email)) {
-            return res.status(400).json({ error: 'Formato de email inválido' });
-        }
-        if (!isValidUsername(username)) {
-            return res.status(400).json({ error: 'El nombre de usuario debe tener 3-30 caracteres alfanuméricos' });
-        }
-        if (!isValidPassword(password)) {
-            return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres, incluyendo letras y números' });
-        }
-
-        try {
-            const hashedPassword = await bcrypt.hash(password, 10);
-            const userId = uuidv4();
-            const stmt = db.prepare('INSERT INTO users (id, email, username, passwordHash, createdAt) VALUES (?, ?, ?, ?, ?)');
-            stmt.run(userId, email, username, hashedPassword, Date.now());
-            res.status(201).json({ message: 'Usuario registrado' });
-        } catch (err) {
-            if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-                return res.status(409).json({ error: 'El email o nombre de usuario ya existe' });
-            }
-            res.status(500).json({ error: 'Error interno' });
-        }
-    });
-
-    // Login endpoint
-    testApp.post('/api/auth/login', async (req, res) => {
-        const { login, password } = req.body;
-        if (!login || !password) {
-            return res.status(400).json({ error: 'Faltan campos requeridos' });
-        }
-
-        const stmt = db.prepare('SELECT * FROM users WHERE email = ? OR username = ?');
-        const user = stmt.get(login, login);
-
-        if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
-            return res.status(401).json({ error: 'Credenciales inválidas' });
-        }
-
-        req.session.userId = user.id;
-        res.json({ message: 'Sesión iniciada', user: { id: user.id, username: user.username } });
-    });
-
-    // Me endpoint
-    testApp.get('/api/auth/me', (req, res) => {
-        if (!req.session.userId) {
-            return res.status(401).json({ error: 'No autenticado' });
-        }
-        const stmt = db.prepare('SELECT id, username, email, role FROM users WHERE id = ?');
-        const user = stmt.get(req.session.userId);
-        if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-        res.json({ user });
-    });
-
-    // Logout endpoint
-    testApp.post('/api/auth/logout', (req, res) => {
-        req.session.destroy((err) => {
-            if (err) return res.status(500).json({ error: 'Error al cerrar sesión' });
-            res.json({ message: 'Sesión cerrada' });
-        });
-    });
-
-    return testApp;
-};
+let startServer;
 
 describe('Auth API', () => {
-    beforeAll(() => {
-        // Create test database
-        db = new Database(testDbPath);
-        db.exec(`
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                email TEXT UNIQUE NOT NULL,
-                username TEXT UNIQUE NOT NULL,
-                passwordHash TEXT NOT NULL,
-                role TEXT DEFAULT 'user',
-                isVerified INTEGER DEFAULT 0,
-                createdAt INTEGER NOT NULL
-            )
-        `);
-        app = createTestApp();
+    beforeAll(async () => {
+        const serverModule = await import('../server.js');
+        startServer = serverModule.startServer;
+        app = serverModule.app;
+        await startServer({ dbPathOverride: testDbPath, listen: false, enableSchedulers: false, enableJobs: true });
+        db = serverModule.db;
     });
 
     afterAll(() => {
-        db.close();
+        if (db && db.close) {
+            db.close();
+        }
         // Clean up test database
         if (fs.existsSync(testDbPath)) {
             fs.unlinkSync(testDbPath);
@@ -145,7 +53,7 @@ describe('Auth API', () => {
                 });
 
             expect(res.status).toBe(201);
-            expect(res.body.message).toBe('Usuario registrado');
+            expect(res.body.message).toContain('Usuario registrado');
         });
 
         it('should reject invalid email format', async () => {

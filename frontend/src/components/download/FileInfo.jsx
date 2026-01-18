@@ -1,6 +1,6 @@
-import { FileIcon, Download, Calendar, HardDrive } from 'lucide-react';
+import { FileIcon, Download, Calendar, HardDrive, AlertCircle } from 'lucide-react';
 
-const FileInfo = ({ file, onDownload }) => {
+const FileInfo = ({ file, onDownload, error }) => {
     const formatSize = (bytes) => {
         if (bytes === 0) return '0 Bytes';
         const k = 1024;
@@ -27,6 +27,13 @@ const FileInfo = ({ file, onDownload }) => {
                     <span>{new Date(file.createdAt).toLocaleDateString()}</span>
                 </div>
             </div>
+
+            {error && (
+                <div className="mb-4 p-3 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded-lg flex items-center gap-2 text-sm">
+                    <AlertCircle size={16} />
+                    <span>{error}</span>
+                </div>
+            )}
 
             <button
                 onClick={onDownload}

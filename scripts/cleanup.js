@@ -1,8 +1,8 @@
-import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import { initDatabase, saveDatabase, closeDatabase } from '../backend/lib/database.js';
 
 dotenv.config();
 
@@ -10,10 +10,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.join(__dirname, '..');
 
-const dbPath = path.join(rootDir, 'db.sqlite');
-const db = new Database(dbPath);
+const dbPath = path.join(rootDir, 'data', 'db.sqlite');
 
-const cleanup = () => {
+const cleanup = async () => {
+    const db = await initDatabase(dbPath);
     console.log('Running cleanup...');
     const now = Date.now();
 
@@ -47,6 +47,11 @@ const cleanup = () => {
     }
 
     console.log('Cleanup complete.');
+    saveDatabase();
+    closeDatabase();
 };
 
-cleanup();
+cleanup().catch(err => {
+    console.error('Cleanup error:', err);
+    process.exit(1);
+});

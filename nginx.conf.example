@@ -1,0 +1,166 @@
+# =============================================================================
+# SENDU - Nginx Reverse Proxy Configuration
+# =============================================================================
+# Copia este archivo a nginx.conf y ajusta según tu entorno.
+#
+# IMPORTANTE para subidas grandes (>100GB):
+# - client_max_body_size debe ser >= al chunk más grande (recomendado: 200m)
+# - Los timeouts deben ser suficientes para chunks lentos
+# - Desactiva proxy_buffering para mejor feedback de progreso
+# =============================================================================
+
+# Configuración de upstream
+upstream sendu_backend {
+    server sendu-app:3000;
+    keepalive 32;  # Mantener conexiones vivas para mejor rendimiento
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name sendu.example.com;  # Cambia por tu dominio
+    
+    # Redirigir HTTP a HTTPS (descomenta en producción)
+    # return 301 https://$host$request_uri;
+    
+    # Para desarrollo sin SSL, puedes usar esta configuración directamente
+    include /etc/nginx/conf.d/sendu-common.conf;
+}
+
+# server {
+#     listen 443 ssl http2;
+#     listen [::]:443 ssl http2;
+#     server_name sendu.example.com;
+#     
+#     # Certificados SSL
+#     ssl_certificate /etc/nginx/certs/fullchain.pem;
+#     ssl_certificate_key /etc/nginx/certs/privkey.pem;
+#     
+#     # Configuración SSL moderna
+#     ssl_protocols TLSv1.2 TLSv1.3;
+#     ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
+#     ssl_prefer_server_ciphers off;
+#     
+#     include /etc/nginx/conf.d/sendu-common.conf;
+# }
+
+# =============================================================================
+# Configuración común (crear como /etc/nginx/conf.d/sendu-common.conf)
+# =============================================================================
+
+# --- LÍMITES CRÍTICOS PARA SUBIDAS GRANDES ---
+
+# Tamaño máximo del body de la petición
+# IMPORTANTE: Esto debe ser >= al tamaño máximo de chunk (por defecto 100MB)
+# Para mayor seguridad, usar 200MB
+client_max_body_size 200m;
+
+# Buffer para el body del cliente
+# Usar valor pequeño para evitar buffering excesivo en memoria
+client_body_buffer_size 1m;
+
+# Escribir bodies grandes a disco en lugar de RAM
+client_body_in_file_only off;
+
+# --- TIMEOUTS ---
+
+# Timeout para leer body del cliente (para uploads lentos)
+client_body_timeout 300s;
+
+# Timeout para enviar respuesta al cliente
+send_timeout 300s;
+
+# Timeouts de proxy
+proxy_connect_timeout 60s;
+proxy_send_timeout 300s;
+proxy_read_timeout 300s;
+
+# --- PROXY PASS ---
+
+location / {
+    proxy_pass http://sendu_backend;
+    
+    # Headers estándar
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    
+    # CRÍTICO: Desactivar buffering para uploads
+    # Esto permite que el progreso se reporte correctamente
+    proxy_buffering off;
+    proxy_request_buffering off;
+    
+    # Mantener conexiones vivas
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+}
+
+# Ruta específica para chunks de upload (optimizada)
+location /api/upload/chunk {
+    proxy_pass http://sendu_backend;
+    
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    
+    # CRÍTICO para subidas grandes
+    client_max_body_size 200m;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    
+    # Timeouts más largos para chunks grandes
+    proxy_send_timeout 600s;
+    proxy_read_timeout 600s;
+    client_body_timeout 600s;
+    
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+}
+
+# Ruta para descargas (puede necesitar streaming)
+location /api/download/ {
+    proxy_pass http://sendu_backend;
+    
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    
+    # Desactivar buffering para descargas grandes
+    proxy_buffering off;
+    
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+}
+
+# =============================================================================
+# NOTAS IMPORTANTES
+# =============================================================================
+#
+# 1. CLOUDFLARE: Si usas Cloudflare, ten en cuenta:
+#    - Plan gratuito: máximo 100MB por request (los chunks deben ser <100MB)
+#    - Plan Pro: máximo 200MB
+#    - Considera deshabilitar el proxy de Cloudflare para /api/upload/chunk
+#    - O usa Cloudflare Tunnel con configuración apropiada
+#
+# 2. CLOUDFLARE TUNNEL: Si usas cloudflared tunnel:
+#    - Añade en tu config.yaml:
+#      ingress:
+#        - hostname: sendu.example.com
+#          service: http://sendu-app:3000
+#          originRequest:
+#            noTLSVerify: true
+#            connectTimeout: 30s
+#            tcpKeepAlive: 30s
+#            keepAliveTimeout: 600s
+#            httpHostHeader: sendu.example.com
+#
+# 3. AWS ALB/ELB: Si usas Application Load Balancer:
+#    - Incrementa idle_timeout a 600 segundos
+#    - Desactiva client keepalive si hay problemas
+#
+# 4. TESTING: Para probar si Nginx es el problema:
+#    - Accede directamente al puerto 3000 del contenedor
+#    - Si las subidas funcionan sin Nginx, el problema está aquí

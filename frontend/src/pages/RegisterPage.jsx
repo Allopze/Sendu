@@ -1,67 +1,108 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import useAuth from '../hooks/useAuth';
+import { useToast } from '../context/ToastContext';
+import { useTheme } from '../context/ThemeContext';
+import { UserPlus } from 'lucide-react';
+import Button from '../components/ui/Button';
+import Input from '../components/ui/Input';
 
 const RegisterPage = () => {
     const [formData, setFormData] = useState({ email: '', username: '', password: '' });
-    const [error, setError] = useState('');
+    const [loading, setLoading] = useState(false);
     const { register } = useAuth();
     const navigate = useNavigate();
+    const toast = useToast();
+    const { isDark } = useTheme();
 
     const handleSubmit = async (e) => {
         e.preventDefault();
-        setError('');
+        setLoading(true);
+        
         const res = await register(formData);
+        setLoading(false);
+        
         if (res.success) {
+            toast.success('¡Cuenta creada! Revisa tu email para verificar tu cuenta');
             navigate('/login');
         } else {
-            setError(res.error || 'Error en el registro');
+            if (res.error?.includes('already') || res.error?.includes('existe') || res.error?.includes('registered')) {
+                toast.error('Este email o usuario ya está registrado');
+            } else if (res.error?.includes('password') || res.error?.includes('contraseña')) {
+                toast.error('La contraseña debe tener al menos 6 caracteres');
+            } else if (res.error?.includes('email') || res.error?.includes('correo')) {
+                toast.error('Ingresa un email válido');
+            } else {
+                toast.error(res.error || 'Error en el registro');
+            }
         }
     };
 
     return (
-        <div className="max-w-md mx-auto mt-20">
-            <div className="glass p-8 rounded-2xl">
-                <h2 className="text-3xl font-bold mb-6 text-center">Crear Cuenta</h2>
-                {error && <div className="bg-red-100 text-red-700 p-3 rounded-lg mb-4 text-sm">{error}</div>}
-                <form onSubmit={handleSubmit} className="space-y-4">
-                    <div>
-                        <label className="block text-sm font-medium mb-1">Email</label>
-                        <input
-                            type="email"
-                            className="w-full px-4 py-2 rounded-xl bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 focus:ring-2 focus:ring-primary-500 outline-none transition-all"
-                            value={formData.email}
-                            onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                            required
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium mb-1">Usuario</label>
-                        <input
-                            type="text"
-                            className="w-full px-4 py-2 rounded-xl bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 focus:ring-2 focus:ring-primary-500 outline-none transition-all"
-                            value={formData.username}
-                            onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                            required
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium mb-1">Contraseña</label>
-                        <input
-                            type="password"
-                            className="w-full px-4 py-2 rounded-xl bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 focus:ring-2 focus:ring-primary-500 outline-none transition-all"
-                            value={formData.password}
-                            onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                            required
-                        />
-                    </div>
-                    <button type="submit" className="w-full py-3 bg-primary-600 text-white rounded-xl hover:bg-primary-700 font-bold transition-all transform hover:scale-[1.02]">
-                        Registrarse
-                    </button>
-                </form>
-                <p className="mt-6 text-center text-sm text-gray-500">
-                    ¿Ya tienes cuenta? <Link to="/login" className="text-primary-600 hover:underline">Inicia Sesión</Link>
+        <div className="w-full animate-enter">
+            {/* Header */}
+            <div className="text-center mb-8">
+                <div className="w-12 h-12 bg-red-600 rounded-lg mx-auto flex items-center justify-center mb-4 text-white">
+                    <UserPlus size={24} />
+                </div>
+                <h2 className={`text-2xl font-bold mb-2 ${isDark ? 'text-white' : 'text-zinc-900'}`}>
+                    Crear Cuenta
+                </h2>
+                <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>
+                    Sube archivos de hasta 50GB.
                 </p>
+            </div>
+
+            {/* Form */}
+            <form onSubmit={handleSubmit} className="space-y-4 mb-6">
+                <Input
+                    label="Email"
+                    type="email"
+                    placeholder="usuario@ejemplo.com"
+                    value={formData.email}
+                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                    required
+                    disabled={loading}
+                />
+                <Input
+                    label="Usuario"
+                    type="text"
+                    placeholder="tunombre"
+                    value={formData.username}
+                    onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                    required
+                    disabled={loading}
+                />
+                <Input
+                    label="Contraseña"
+                    type="password"
+                    placeholder=""
+                    value={formData.password}
+                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                    required
+                    disabled={loading}
+                />
+                
+                <Button 
+                    type="submit" 
+                    className="w-full"
+                    loading={loading}
+                >
+                    {loading ? 'Creando cuenta...' : 'Registrarse'}
+                </Button>
+            </form>
+
+            {/* Footer */}
+            <div className="text-center">
+                <span className={`text-sm ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>
+                    ¿Ya tienes cuenta?{' '}
+                </span>
+                <Link 
+                    to="/login" 
+                    className={`text-sm font-medium ${isDark ? 'text-white hover:text-red-400' : 'text-zinc-900 hover:text-red-600'}`}
+                >
+                    Inicia Sesión
+                </Link>
             </div>
         </div>
     );
