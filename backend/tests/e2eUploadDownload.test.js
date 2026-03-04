@@ -24,6 +24,13 @@ let db;
 let app;
 let startServer;
 
+const extractCsrfToken = (response) => {
+    const cookies = response.headers['set-cookie'] || [];
+    const csrfCookie = cookies.find((cookie) => cookie.startsWith('csrf-token='));
+    if (!csrfCookie) return null;
+    return csrfCookie.split(';')[0].split('=')[1] || null;
+};
+
 describe('E2E Upload/Download', () => {
     beforeAll(async () => {
         fs.mkdirSync(uploadsDir, { recursive: true });
@@ -48,9 +55,14 @@ describe('E2E Upload/Download', () => {
 
     it('should upload a small file and download it', async () => {
         const content = Buffer.from('hello sendu');
+        const agent = request.agent(app);
 
-        const initRes = await request(app)
+        const csrfRes = await agent.get('/api/auth/me');
+        let csrfToken = extractCsrfToken(csrfRes);
+
+        const initRes = await agent
             .post('/api/upload/init')
+            .set('x-csrf-token', csrfToken)
             .send({
                 originalName: 'hello.txt',
                 size: content.length,
@@ -58,19 +70,22 @@ describe('E2E Upload/Download', () => {
                 totalChunks: 1
             });
 
+        csrfToken = extractCsrfToken(initRes) || csrfToken;
+
         expect(initRes.status).toBe(200);
         expect(initRes.body.uploadId).toBeDefined();
 
         const uploadId = initRes.body.uploadId;
 
-        const chunkRes = await request(app)
+        const chunkRes = await agent
             .post(`/api/upload/chunk?uploadId=${uploadId}&index=0`)
             .attach('chunk', content, 'hello.txt');
 
         expect(chunkRes.status).toBe(200);
 
-        const completeRes = await request(app)
+        const completeRes = await agent
             .post('/api/upload/complete')
+            .set('x-csrf-token', csrfToken)
             .send({ uploadId });
 
         expect(completeRes.status).toBe(200);
@@ -78,7 +93,7 @@ describe('E2E Upload/Download', () => {
 
         const fileId = completeRes.body.fileId;
 
-        const downloadRes = await request(app)
+        const downloadRes = await agent
             .get(`/api/download/${fileId}`)
             .buffer(true)
             .parse((res, cb) => {

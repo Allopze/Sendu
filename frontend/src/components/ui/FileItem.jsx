@@ -1,7 +1,7 @@
-import { File, X, FileText, FileImage, FileVideo, FileAudio, FileArchive, FileCode } from 'lucide-react';
+import { X, FileText, FileImage, FileVideo, FileAudio, FileArchive, FileCode } from 'lucide-react';
 import { useTheme } from '../../context/ThemeContext';
 
-const getFileIcon = (fileName) => {
+const renderFileIcon = (fileName, props) => {
   const ext = fileName?.split('.').pop()?.toLowerCase();
   const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
   const videoExts = ['mp4', 'avi', 'mov', 'mkv', 'webm', 'flv', 'wmv'];
@@ -9,12 +9,12 @@ const getFileIcon = (fileName) => {
   const archiveExts = ['zip', 'rar', '7z', 'tar', 'gz', 'bz2'];
   const codeExts = ['js', 'ts', 'jsx', 'tsx', 'py', 'java', 'cpp', 'c', 'html', 'css', 'json', 'xml'];
 
-  if (imageExts.includes(ext)) return FileImage;
-  if (videoExts.includes(ext)) return FileVideo;
-  if (audioExts.includes(ext)) return FileAudio;
-  if (archiveExts.includes(ext)) return FileArchive;
-  if (codeExts.includes(ext)) return FileCode;
-  return FileText;
+  if (imageExts.includes(ext)) return <FileImage {...props} />;
+  if (videoExts.includes(ext)) return <FileVideo {...props} />;
+  if (audioExts.includes(ext)) return <FileAudio {...props} />;
+  if (archiveExts.includes(ext)) return <FileArchive {...props} />;
+  if (codeExts.includes(ext)) return <FileCode {...props} />;
+  return <FileText {...props} />;
 };
 
 const formatSize = (bytes) => {
@@ -31,9 +31,8 @@ const formatSize = (bytes) => {
   return `${bytes} B`;
 };
 
-const FileItem = ({ name, size, type, onDelete }) => {
+const FileItem = ({ name, size, onDelete }) => {
   const { isDark } = useTheme();
-  const FileIconComponent = getFileIcon(name);
   const displaySize = typeof size === 'number' ? formatSize(size) : size;
   
   return (
@@ -44,7 +43,7 @@ const FileItem = ({ name, size, type, onDelete }) => {
     `}>
       <div className="flex items-center gap-3 overflow-hidden flex-1 min-w-0">
         <div className={`p-2 rounded-lg flex-shrink-0 ${isDark ? 'bg-zinc-800' : 'bg-zinc-200'} text-zinc-500`}>
-          <FileIconComponent size={18} />
+          {renderFileIcon(name, { size: 18 })}
         </div>
         <div className="flex flex-col min-w-0 flex-1">
           <span className={`text-sm font-medium truncate ${isDark ? 'text-zinc-200' : 'text-zinc-700'}`}>
@@ -65,5 +64,4 @@ const FileItem = ({ name, size, type, onDelete }) => {
   );
 };
 
-export { getFileIcon, formatSize };
 export default FileItem;

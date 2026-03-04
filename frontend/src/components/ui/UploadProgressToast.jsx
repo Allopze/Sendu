@@ -1,5 +1,5 @@
 import { useNavigate, useLocation } from 'react-router-dom';
-import { Upload, X, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
+import { Upload, X } from 'lucide-react';
 import { useUploadContext } from '../../context/UploadContext';
 
 const UploadProgressToast = () => {
@@ -7,7 +7,6 @@ const UploadProgressToast = () => {
     const location = useLocation();
     const { 
         progress, 
-        status, 
         currentFile, 
         uploadOriginPath, 
         isUploading,

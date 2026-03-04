@@ -19,6 +19,7 @@ import logger from './logger.js';
 let db = null;
 let isProcessing = false;
 let processingInterval = null;
+let cleanupInterval = null;
 
 // Job types
 export const JOB_TYPES = {
@@ -52,6 +53,18 @@ let config = { ...DEFAULT_CONFIG };
 // Job handlers registry
 const jobHandlers = new Map();
 
+const isDbOpen = () => {
+    if (!db) {
+        return false;
+    }
+    if (typeof db.open === 'boolean') {
+        return db.open;
+    }
+    return true;
+};
+
+const isDbClosedError = (err) => /database connection is not open/i.test(err?.message || '');
+
 /**
  * Initialize the job queue system
  * @param {object} database - The database instance
@@ -60,6 +73,10 @@ const jobHandlers = new Map();
 export function initJobQueue(database, options = {}) {
     db = database;
     config = { ...DEFAULT_CONFIG, ...options };
+
+    if (!isDbOpen()) {
+        throw new Error('Job queue requires an open database connection');
+    }
     
     createJobTables();
     
@@ -67,7 +84,10 @@ export function initJobQueue(database, options = {}) {
     startJobProcessor();
     
     // Cleanup old completed jobs periodically (every hour)
-    setInterval(cleanupOldJobs, 60 * 60 * 1000);
+    if (cleanupInterval) {
+        clearInterval(cleanupInterval);
+    }
+    cleanupInterval = setInterval(cleanupOldJobs, 60 * 60 * 1000);
     
     logger.info('Job queue system initialized');
 }
@@ -76,6 +96,10 @@ export function initJobQueue(database, options = {}) {
  * Create job queue tables
  */
 function createJobTables() {
+    if (!isDbOpen()) {
+        return;
+    }
+
     db.exec(`
         CREATE TABLE IF NOT EXISTS job_queue (
             id TEXT PRIMARY KEY,
@@ -205,6 +229,10 @@ export function enqueueBrandingConversion(imagePath, outputPath, options = {}) {
  * @returns {object|null} The job or null if none available
  */
 function acquireNextJob(workerId) {
+    if (!isDbOpen()) {
+        return null;
+    }
+
     const now = Date.now();
     const lockDuration = config.jobTimeoutMs;
     
@@ -244,6 +272,10 @@ function acquireNextJob(workerId) {
             payload: JSON.parse(job.payload),
         };
     } catch (err) {
+        if (isDbClosedError(err)) {
+            stopJobProcessor();
+            return null;
+        }
         logger.error('Error acquiring job', { error: err.message });
         return null;
     }
@@ -321,6 +353,11 @@ function failJob(jobId, error, attempts, maxRetries) {
  * Process the next available job
  */
 async function processNextJob() {
+    if (!isDbOpen()) {
+        stopJobProcessor();
+        return;
+    }
+
     if (isProcessing) return;
     
     const workerId = `worker-${process.pid}-${Date.now()}`;
@@ -362,14 +399,21 @@ async function processNextJob() {
  * Start the job processor
  */
 function startJobProcessor() {
-    if (processingInterval) return;
+    if (processingInterval || !isDbOpen()) return;
     
     // Reset any stale processing jobs (from crashed workers)
-    db.prepare(`
-        UPDATE job_queue 
-        SET status = 'pending', locked_by = NULL, locked_until = NULL 
-        WHERE status = 'processing' AND locked_until < ?
-    `).run(Date.now());
+    try {
+        db.prepare(`
+            UPDATE job_queue 
+            SET status = 'pending', locked_by = NULL, locked_until = NULL 
+            WHERE status = 'processing' AND locked_until < ?
+        `).run(Date.now());
+    } catch (err) {
+        if (!isDbClosedError(err)) {
+            logger.error('Failed to reset stale processing jobs', { error: err.message });
+        }
+        return;
+    }
     
     // Process jobs at regular intervals
     processingInterval = setInterval(processNextJob, config.processingIntervalMs);
@@ -384,10 +428,17 @@ function startJobProcessor() {
  * Stop the job processor
  */
 export function stopJobProcessor() {
+    isProcessing = false;
+
     if (processingInterval) {
         clearInterval(processingInterval);
         processingInterval = null;
         logger.info('Job processor stopped');
+    }
+
+    if (cleanupInterval) {
+        clearInterval(cleanupInterval);
+        cleanupInterval = null;
     }
 }
 
@@ -395,6 +446,10 @@ export function stopJobProcessor() {
  * Clean up old completed and dead jobs
  */
 function cleanupOldJobs() {
+    if (!isDbOpen()) {
+        return;
+    }
+
     const cutoff = Date.now() - (config.cleanupAfterDays * 24 * 60 * 60 * 1000);
     
     try {
@@ -417,6 +472,10 @@ function cleanupOldJobs() {
  * @returns {object} Queue statistics
  */
 export function getQueueStats() {
+    if (!isDbOpen()) {
+        return { byStatus: {}, byType: {}, total: 0 };
+    }
+
     try {
         const stats = db.prepare(`
             SELECT 
@@ -454,6 +513,10 @@ export function getQueueStats() {
  * @returns {Array} List of jobs
  */
 export function getPendingJobs(type, limit = 10) {
+    if (!isDbOpen()) {
+        return [];
+    }
+
     try {
         return db.prepare(`
             SELECT id, type, payload, priority, attempts, scheduled_at, created_at
@@ -477,6 +540,10 @@ export function getPendingJobs(type, limit = 10) {
  * @returns {number} Number of jobs retried
  */
 export function retryDeadJobs(type = null) {
+    if (!isDbOpen()) {
+        return 0;
+    }
+
     try {
         const query = type
             ? `UPDATE job_queue SET status = 'pending', attempts = 0, scheduled_at = ? WHERE status = 'dead' AND type = ?`
@@ -499,6 +566,10 @@ export function retryDeadJobs(type = null) {
  * @returns {boolean} Whether the job was cancelled
  */
 export function cancelJob(jobId) {
+    if (!isDbOpen()) {
+        return false;
+    }
+
     try {
         const result = db.prepare(`
             DELETE FROM job_queue WHERE id = ? AND status = 'pending'

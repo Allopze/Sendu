@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect } from 'react';
-import { Upload, Clock, Lock, File, X, Shield, Link2, HardDrive, Eye, EyeOff, RefreshCw, FileText, FileImage, FileVideo, FileAudio, FileArchive, FileCode } from 'lucide-react';
+import { Upload, Clock, Lock, X, Eye, EyeOff, RefreshCw, FileText, FileImage, FileVideo, FileAudio, FileArchive, FileCode } from 'lucide-react';
 import clsx from 'clsx';
 import apiClient from '../../api/client';
 
@@ -7,7 +7,7 @@ const DropZone = ({ onFileSelect, options, setOptions, selectedFile, onClearFile
     const [isDragging, setIsDragging] = useState(false);
     const [limits, setLimits] = useState({ maxFileSize: 100, effectiveMaxFileSize: 100, isLoggedIn: false });
     const [showPassword, setShowPassword] = useState(false);
-    const [usePassword, setUsePassword] = useState(false);
+    const [usePassword, setUsePassword] = useState(Boolean(options.password));
     const inputRef = useRef(null);
 
     useEffect(() => {
@@ -16,13 +16,6 @@ const DropZone = ({ onFileSelect, options, setOptions, selectedFile, onClearFile
             .then(data => setLimits(data))
             .catch(err => console.error('Error loading limits:', err));
     }, []);
-
-    // Sincronizar usePassword con options.password
-    useEffect(() => {
-        if (options.password && !usePassword) {
-            setUsePassword(true);
-        }
-    }, [options.password]);
 
     const formatSize = (bytes) => {
         if (bytes >= 1024 * 1024 * 1024) {
@@ -64,7 +57,7 @@ const DropZone = ({ onFileSelect, options, setOptions, selectedFile, onClearFile
         setShowPassword(true);
     };
 
-    const getFileIcon = (fileName) => {
+    const renderFileIcon = (fileName, props) => {
         const ext = fileName.split('.').pop()?.toLowerCase();
         const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
         const videoExts = ['mp4', 'avi', 'mov', 'mkv', 'webm', 'flv', 'wmv'];
@@ -72,12 +65,12 @@ const DropZone = ({ onFileSelect, options, setOptions, selectedFile, onClearFile
         const archiveExts = ['zip', 'rar', '7z', 'tar', 'gz', 'bz2'];
         const codeExts = ['js', 'ts', 'jsx', 'tsx', 'py', 'java', 'cpp', 'c', 'html', 'css', 'json', 'xml'];
 
-        if (imageExts.includes(ext)) return FileImage;
-        if (videoExts.includes(ext)) return FileVideo;
-        if (audioExts.includes(ext)) return FileAudio;
-        if (archiveExts.includes(ext)) return FileArchive;
-        if (codeExts.includes(ext)) return FileCode;
-        return FileText;
+        if (imageExts.includes(ext)) return <FileImage {...props} />;
+        if (videoExts.includes(ext)) return <FileVideo {...props} />;
+        if (audioExts.includes(ext)) return <FileAudio {...props} />;
+        if (archiveExts.includes(ext)) return <FileArchive {...props} />;
+        if (codeExts.includes(ext)) return <FileCode {...props} />;
+        return <FileText {...props} />;
     };
 
     const handleDragOver = (e) => {
@@ -120,8 +113,6 @@ const DropZone = ({ onFileSelect, options, setOptions, selectedFile, onClearFile
 
     // Vista de archivo seleccionado (confirmación antes de subir)
     if (selectedFile) {
-        const FileIconComponent = getFileIcon(selectedFile.name);
-        
         return (
             <div className="flex flex-col h-full animate-enter">
                 {/* Zona de drop compacta */}
@@ -139,7 +130,7 @@ const DropZone = ({ onFileSelect, options, setOptions, selectedFile, onClearFile
                 >
                     <div className="flex items-center gap-4 p-4">
                         <div className="w-14 h-14 rounded-xl flex items-center justify-center bg-gradient-to-br from-primary-500 to-primary-600 text-white shadow-lg shadow-primary-500/30 flex-shrink-0">
-                            <FileIconComponent size={28} strokeWidth={1.5} />
+                            {renderFileIcon(selectedFile.name, { size: 28, strokeWidth: 1.5 })}
                         </div>
                         
                         <div className="flex-1 min-w-0">

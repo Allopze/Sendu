@@ -1,3 +1,4 @@
+/* eslint-env node */
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import dotenv from 'dotenv'
@@ -11,8 +12,8 @@ const __dirname = path.dirname(__filename)
 dotenv.config({ path: path.resolve(__dirname, '.env') })
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') })
 
-const BACKEND_PORT = process.env.BACKEND_PORT || process.env.PORT || 3000
-const FRONTEND_PORT = process.env.FRONTEND_PORT || 5173
+const BACKEND_PORT = globalThis.process?.env?.BACKEND_PORT || globalThis.process?.env?.PORT || 3000
+const FRONTEND_PORT = globalThis.process?.env?.FRONTEND_PORT || 5173
 
 // https://vite.dev/config/
 export default defineConfig({

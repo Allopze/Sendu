@@ -30,7 +30,7 @@ import { runWithLock, getCleanupIntervalWithJitter } from './lib/cleanupCoordina
 import { initDatabase, saveDatabase, closeDatabase } from './lib/database.js';
 import { invalidateUploadCache } from './lib/uploadCache.js';
 import { createChunkRouter } from './chunkRouter.js';
-import { initJobQueue, enqueueEmail, enqueueCleanup, enqueueBrandingConversion, getQueueStats, stopJobProcessor, JOB_TYPES } from './lib/jobQueue.js';
+import { initJobQueue, enqueueEmail, enqueueCleanup, enqueueBrandingConversion, getQueueStats, getPendingJobs, retryDeadJobs, cancelJob, stopJobProcessor, JOB_TYPES } from './lib/jobQueue.js';
 import { initJobHandlers } from './lib/jobHandlers.js';
 import { metrics } from './lib/metrics.js';
 import { runMigrations } from './lib/migrations.js';
@@ -63,6 +63,10 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
     : [PUBLIC_ORIGIN];
 const isProduction = process.env.NODE_ENV === 'production';
 const isTest = process.env.NODE_ENV === 'test';
+const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_POLICY_MESSAGE = `La contraseña debe tener al menos ${PASSWORD_MIN_LENGTH} caracteres, incluyendo letras y números`;
+const SETTINGS_AUDIT_REDACTED = '[REDACTED]';
+const SENSITIVE_SETTINGS_KEYS = new Set(['smtpPass']);
 
 // Timing-safe string comparison (prevents timing attacks on tokens)
 const safeCompare = (a, b) => {
@@ -395,10 +399,7 @@ const csrfMiddleware = csrfProtection({
         '/auth/forgot-password', // Uses email token, protected by rate limiting
         '/auth/reset-password',  // Uses email token for validation
         '/auth/verify',     // Uses email token for validation
-        '/upload/init',     // Upload init protected by session + rate limiting
-        '/upload/chunk',    // File uploads use uploadId as token
-        '/upload/complete', // Uses uploadId for validation
-        '/upload/cancel',   // Uses uploadId for validation
+        '/upload/chunk',    // Handled by optimized router mounted before CSRF
         '/download/',       // Downloads don't need CSRF
         '/settings/public', // Public endpoints
         '/settings/limits',
@@ -779,8 +780,10 @@ const isValidUsername = (username) => {
 };
 
 const isValidPassword = (password) => {
-    // Minimum 8 characters, at least one letter and one number
-    return password && password.length >= 8 && /[a-zA-Z]/.test(password) && /[0-9]/.test(password);
+    return password
+        && password.length >= PASSWORD_MIN_LENGTH
+        && /[a-zA-Z]/.test(password)
+        && /[0-9]/.test(password);
 };
 
 // Auth Routes
@@ -800,28 +803,7 @@ app.post('/api/auth/register', authLimiter, asyncHandler(async (req, res) => {
 
     // Validate password strength
     if (!isValidPassword(password)) {
-        return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres, incluyendo letras y números' });
-    }
-
-    // Registration policy: allow first user bootstrap, then enforce settings
-    let bootstrapRequested = false;
-    const bootstrapSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('adminBootstrapCompleted');
-    const bootstrapCompleted = bootstrapSetting?.value === 'true';
-    const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get()?.count || 0;
-
-    if (userCount === 0) {
-        // First user can register and becomes admin
-        bootstrapRequested = true;
-    } else if (!ALLOW_PUBLIC_REGISTRATION) {
-        if (!ADMIN_BOOTSTRAP_TOKEN) {
-            return res.status(403).json({ error: 'Registro público deshabilitado' });
-        }
-        if (!adminBootstrapToken || !safeCompare(adminBootstrapToken, ADMIN_BOOTSTRAP_TOKEN) || bootstrapCompleted) {
-            return res.status(403).json({ error: 'Registro público deshabilitado' });
-        }
-        bootstrapRequested = true;
-    } else if (adminBootstrapToken && ADMIN_BOOTSTRAP_TOKEN && safeCompare(adminBootstrapToken, ADMIN_BOOTSTRAP_TOKEN) && !bootstrapCompleted) {
-        bootstrapRequested = true;
+        return res.status(400).json({ error: PASSWORD_POLICY_MESSAGE });
     }
 
     try {
@@ -832,14 +814,37 @@ app.post('/api/auth/register', authLimiter, asyncHandler(async (req, res) => {
         const { token: verificationToken, hash: verificationTokenHash } = generateSecureToken();
         const verificationTokenExpires = Date.now() + (24 * 60 * 60 * 1000); // 24 hours
 
-        const role = bootstrapRequested ? 'admin' : 'user';
+        const registerUser = db.transaction(() => {
+            const bootstrapSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('adminBootstrapCompleted');
+            const bootstrapCompleted = bootstrapSetting?.value === 'true';
+            const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get()?.count || 0;
 
-        const stmt = db.prepare('INSERT INTO users (id, email, username, passwordHash, role, verificationToken, verificationTokenExpires, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-        stmt.run(userId, email, username, hashedPassword, role, verificationTokenHash, verificationTokenExpires, Date.now());
+            let bootstrapRequested = false;
+            if (userCount === 0) {
+                bootstrapRequested = true;
+            } else if (!ALLOW_PUBLIC_REGISTRATION) {
+                if (!ADMIN_BOOTSTRAP_TOKEN || !adminBootstrapToken || !safeCompare(adminBootstrapToken, ADMIN_BOOTSTRAP_TOKEN) || bootstrapCompleted) {
+                    const err = new Error('Registro publico deshabilitado');
+                    err.status = 403;
+                    throw err;
+                }
+                bootstrapRequested = true;
+            } else if (adminBootstrapToken && ADMIN_BOOTSTRAP_TOKEN && safeCompare(adminBootstrapToken, ADMIN_BOOTSTRAP_TOKEN) && !bootstrapCompleted) {
+                bootstrapRequested = true;
+            }
 
-        if (bootstrapRequested) {
-            db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('adminBootstrapCompleted', 'true');
-        }
+            const role = bootstrapRequested ? 'admin' : 'user';
+            const stmt = db.prepare('INSERT INTO users (id, email, username, passwordHash, role, verificationToken, verificationTokenExpires, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+            stmt.run(userId, email, username, hashedPassword, role, verificationTokenHash, verificationTokenExpires, Date.now());
+
+            if (bootstrapRequested) {
+                db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('adminBootstrapCompleted', 'true');
+            }
+
+            return bootstrapRequested;
+        });
+
+        const bootstrapRequested = registerUser();
 
         // Send verification email using template
         const verificationLink = `${PUBLIC_ORIGIN}/verify?token=${verificationToken}`;
@@ -854,6 +859,9 @@ app.post('/api/auth/register', authLimiter, asyncHandler(async (req, res) => {
             : 'Usuario registrado. Por favor verifica tu email.';
         res.status(201).json({ message });
     } catch (err) {
+        if (err.status) {
+            return res.status(err.status).json({ error: err.message });
+        }
         if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
             return res.status(409).json({ error: 'El email o nombre de usuario ya existe' });
         }
@@ -1071,7 +1079,7 @@ app.post('/api/auth/reset-password', asyncHandler(async (req, res) => {
     }
 
     if (!isValidPassword(password)) {
-        return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres, incluyendo letras y números' });
+        return res.status(400).json({ error: PASSWORD_POLICY_MESSAGE });
     }
 
     try {
@@ -1446,10 +1454,22 @@ app.post('/api/upload/complete', asyncHandler(async (req, res) => {
     // Invalidar caché inmediatamente
     invalidateUploadCache(uploadId);
 
-    const sessionRow = db.prepare('SELECT status, fileId FROM upload_sessions WHERE uploadId = ?').get(uploadId);
+    const sessionRow = db.prepare('SELECT status, fileId, userId, ipFingerprint FROM upload_sessions WHERE uploadId = ?').get(uploadId);
     if (!sessionRow || sessionRow.status === 'cancelled') {
         return res.status(404).json({ error: 'Sesión de subida no encontrada' });
     }
+
+    if (sessionRow.userId) {
+        if (!req.session.userId || req.session.userId !== sessionRow.userId) {
+            return res.status(403).json({ error: 'No autorizado para completar esta subida' });
+        }
+    } else {
+        const requestFingerprint = getIpFingerprint(req);
+        if (!sessionRow.ipFingerprint || sessionRow.ipFingerprint !== requestFingerprint) {
+            return res.status(403).json({ error: 'No autorizado para completar esta subida' });
+        }
+    }
+
     if (sessionRow.status === 'completed' && sessionRow.fileId) {
         return res.json({ fileId: sessionRow.fileId, message: 'Subida completada' });
     }
@@ -1682,6 +1702,22 @@ app.post('/api/upload/cancel', asyncHandler(async (req, res) => {
 
     // Invalidar caché inmediatamente
     invalidateUploadCache(uploadId);
+
+    const sessionRow = db.prepare('SELECT userId, ipFingerprint FROM upload_sessions WHERE uploadId = ?').get(uploadId);
+    if (!sessionRow) {
+        return res.status(404).json({ error: 'Sesion de subida no encontrada' });
+    }
+
+    if (sessionRow.userId) {
+        if (!req.session.userId || req.session.userId !== sessionRow.userId) {
+            return res.status(403).json({ error: 'No autorizado para cancelar esta subida' });
+        }
+    } else {
+        const requestFingerprint = getIpFingerprint(req);
+        if (!sessionRow.ipFingerprint || sessionRow.ipFingerprint !== requestFingerprint) {
+            return res.status(403).json({ error: 'No autorizado para cancelar esta subida' });
+        }
+    }
 
     const uploadPath = path.join(CHUNKS_DIR, uploadId);
 
@@ -2064,7 +2100,7 @@ app.post('/api/admin/users/:id/reset-password', requireAdmin, async (req, res) =
     const { password } = req.body;
 
     if (!password || !isValidPassword(password)) {
-        return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres, incluyendo letras y números' });
+        return res.status(400).json({ error: PASSWORD_POLICY_MESSAGE });
     }
 
     try {
@@ -2174,11 +2210,75 @@ app.get('/api/admin/files', requireAdmin, (req, res) => {
     });
 });
 
+const stringifySettingValue = (value) => {
+    if (value === undefined || value === null) {
+        return '';
+    }
+    return String(value);
+};
+
+const sanitizeSettingAuditValue = (key, value) => {
+    if (SENSITIVE_SETTINGS_KEYS.has(key)) {
+        return value ? SETTINGS_AUDIT_REDACTED : '';
+    }
+    const normalized = value === undefined || value === null ? '' : String(value);
+    const MAX_AUDIT_VALUE_LEN = 2000;
+    if (normalized.length > MAX_AUDIT_VALUE_LEN) {
+        return `${normalized.slice(0, MAX_AUDIT_VALUE_LEN)}...[truncated]`;
+    }
+    return normalized;
+};
+
 app.get('/api/admin/settings', requireAdmin, (req, res) => {
-    const settings = db.prepare('SELECT * FROM settings').all();
+    const settings = db.prepare('SELECT key, value FROM settings').all();
     const settingsMap = {};
-    settings.forEach(s => settingsMap[s.key] = s.value);
+
+    settings.forEach((setting) => {
+        if (SENSITIVE_SETTINGS_KEYS.has(setting.key)) {
+            settingsMap[setting.key] = '';
+            settingsMap.smtpPassConfigured = Boolean(setting.value);
+            return;
+        }
+        settingsMap[setting.key] = setting.value;
+    });
+
+    if (settingsMap.smtpPassConfigured === undefined) {
+        settingsMap.smtpPassConfigured = false;
+    }
+
     res.json(settingsMap);
+});
+
+app.get('/api/admin/settings/audit', requireAdmin, (req, res) => {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const offset = (page - 1) * limit;
+
+    const { total } = db.prepare('SELECT COUNT(*) as total FROM settings_audit_log').get();
+    const entries = db.prepare(`
+        SELECT
+            l.id,
+            l.adminUserId,
+            u.username AS adminUsername,
+            l.settingKey,
+            l.oldValue,
+            l.newValue,
+            l.changedAt
+        FROM settings_audit_log l
+        LEFT JOIN users u ON u.id = l.adminUserId
+        ORDER BY l.changedAt DESC
+        LIMIT ? OFFSET ?
+    `).all(limit, offset);
+
+    res.json({
+        entries,
+        pagination: {
+            page,
+            limit,
+            total,
+            totalPages: Math.ceil(total / limit)
+        }
+    });
 });
 
 // Admin: Reset rate limit counters
@@ -2194,6 +2294,10 @@ app.post('/api/admin/rate-limits/reset', requireAdmin, (req, res) => {
 
 app.post('/api/admin/settings', requireAdmin, (req, res) => {
     const settings = req.body;
+
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+        return res.status(400).json({ error: 'Payload de configuracion invalido' });
+    }
 
     // Allowlist of valid settings keys (prevents arbitrary key injection)
     const ALLOWED_SETTINGS_KEYS = new Set([
@@ -2213,24 +2317,70 @@ app.post('/api/admin/settings', requireAdmin, (req, res) => {
         return res.status(400).json({ error: `Claves de configuración no permitidas: ${unknownKeys.join(', ')}` });
     }
 
-    const stmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+    const getCurrentStmt = db.prepare('SELECT value FROM settings WHERE key = ?');
+    const upsertStmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+    const auditStmt = db.prepare(`
+        INSERT INTO settings_audit_log (adminUserId, settingKey, oldValue, newValue, changedAt)
+        VALUES (?, ?, ?, ?, ?)
+    `);
 
-    // Keys that should be encrypted
-    const sensitiveKeys = ['smtpPass'];
+    const applySettings = db.transaction((incomingSettings, adminUserId) => {
+        const now = Date.now();
+        const changedKeys = [];
 
-    const insertMany = db.transaction((settings) => {
-        for (const [key, value] of Object.entries(settings)) {
-            // Encrypt sensitive values
-            const finalValue = sensitiveKeys.includes(key) && value ? encrypt(value) : String(value);
-            stmt.run(key, finalValue);
+        for (const [key, rawValue] of Object.entries(incomingSettings)) {
+            const existingValue = getCurrentStmt.get(key)?.value ?? null;
+            let finalValue = null;
+
+            if (SENSITIVE_SETTINGS_KEYS.has(key)) {
+                const submittedSecret = typeof rawValue === 'string' ? rawValue.trim() : '';
+
+                // Empty values mean "keep existing secret" to avoid accidental secret deletion.
+                if (!submittedSecret) {
+                    continue;
+                }
+
+                const existingSecret = existingValue
+                    ? (isEncrypted(existingValue) ? decrypt(existingValue) : existingValue)
+                    : '';
+
+                if (existingSecret && safeCompare(existingSecret, submittedSecret)) {
+                    continue;
+                }
+
+                finalValue = isEncrypted(submittedSecret) ? submittedSecret : encrypt(submittedSecret);
+            } else {
+                finalValue = stringifySettingValue(rawValue);
+                if (existingValue === finalValue) {
+                    continue;
+                }
+            }
+
+            upsertStmt.run(key, finalValue);
+            auditStmt.run(
+                adminUserId,
+                key,
+                sanitizeSettingAuditValue(key, existingValue),
+                sanitizeSettingAuditValue(key, finalValue),
+                now
+            );
+            changedKeys.push(key);
         }
+
+        return changedKeys;
     });
 
     try {
-        insertMany(settings);
+        const changedKeys = applySettings(settings, req.session.userId || 'unknown');
+
         // Invalidate cache so new values take effect immediately
-        invalidateSettingsCache(Object.keys(settings));
-        res.json({ message: 'Configuración actualizada' });
+        if (changedKeys.length > 0) {
+            invalidateSettingsCache(changedKeys);
+        }
+        res.json({
+            message: changedKeys.length > 0 ? 'Configuracion actualizada' : 'Sin cambios',
+            changedKeys
+        });
     } catch (err) {
         logger.error('Error al actualizar configuración', { error: err.message });
         res.status(500).json({ error: 'Error al actualizar configuración' });
@@ -2566,12 +2716,6 @@ if (process.env.NODE_ENV === 'production') {
     });
 }
 
-// 404 handler for unmatched routes
-app.use(notFoundHandler);
-
-// Global error handler (must be last)
-app.use(globalErrorHandler);
-
 // Database Initialization (Schema)
 const initDb = () => {
     // Run versioned migrations (idempotent)
@@ -2777,6 +2921,57 @@ app.get('/api/admin/jobs/stats', requireAdmin, asyncHandler(async (req, res) => 
     res.json(stats);
 }));
 
+// Admin endpoint to list pending jobs (optionally filtered by type)
+app.get('/api/admin/jobs/pending', requireAdmin, asyncHandler(async (req, res) => {
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const type = typeof req.query.type === 'string' ? req.query.type : null;
+
+    if (type && type !== 'all' && !Object.values(JOB_TYPES).includes(type)) {
+        return res.status(400).json({ error: 'Tipo de job invalido' });
+    }
+
+    if (type && type !== 'all') {
+        return res.json({ jobs: getPendingJobs(type, limit) });
+    }
+
+    const combined = Object.values(JOB_TYPES)
+        .flatMap((jobType) => getPendingJobs(jobType, limit))
+        .sort((a, b) => {
+            if (a.priority !== b.priority) {
+                return b.priority - a.priority;
+            }
+            return a.scheduled_at - b.scheduled_at;
+        })
+        .slice(0, limit);
+
+    return res.json({ jobs: combined });
+}));
+
+// Admin endpoint to retry dead jobs
+app.post('/api/admin/jobs/retry-dead', requireAdmin, asyncHandler(async (req, res) => {
+    const { type } = req.body || {};
+
+    if (type && !Object.values(JOB_TYPES).includes(type)) {
+        return res.status(400).json({ error: 'Tipo de job invalido' });
+    }
+
+    const retried = retryDeadJobs(type || null);
+    res.json({
+        message: `Se reintentaron ${retried} job(s) muertos`,
+        retried,
+        type: type || 'all'
+    });
+}));
+
+// Admin endpoint to cancel a pending job
+app.post('/api/admin/jobs/:id/cancel', requireAdmin, asyncHandler(async (req, res) => {
+    const cancelled = cancelJob(req.params.id);
+    if (!cancelled) {
+        return res.status(404).json({ error: 'Job no encontrado o no esta pendiente' });
+    }
+    res.json({ message: 'Job cancelado', id: req.params.id });
+}));
+
 // Admin endpoint for basic operational metrics
 app.get('/api/admin/metrics', requireAdmin, asyncHandler(async (req, res) => {
     let disk = null;
@@ -2811,6 +3006,12 @@ app.post('/api/admin/jobs/cleanup', requireAdmin, asyncHandler(async (req, res) 
         jobs
     });
 }));
+
+// 404 handler for unmatched routes
+app.use(notFoundHandler);
+
+// Global error handler (must be last)
+app.use(globalErrorHandler);
 
 // Cleanup with distributed locking (safe for multi-replica)
 const runCleanup = async () => {

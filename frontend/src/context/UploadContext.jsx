@@ -1,5 +1,5 @@
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useState, useRef, useEffect, useCallback } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
 import apiClient, { UPLOAD_API_BASE } from '../api/client';
 
 const UploadContext = createContext(null);
@@ -299,7 +299,7 @@ export const UploadProvider = ({ children }) => {
             try {
                 await apiClient.cancelUpload(uploadIdRef.current);
                 clearUploadState(uploadIdRef.current);
-            } catch (e) {
+            } catch {
                 // Ignore errors during cleanup
             }
             uploadIdRef.current = null;
@@ -509,7 +509,7 @@ export const UploadProvider = ({ children }) => {
                     chunk, 
                     chunkTimeoutMs,
                     abortControllerRef.current?.signal,
-                    (loaded, total) => {
+                    (loaded) => {
                         inProgressBytes.set(chunkIndex, loaded);
                         
                         let currentBytesUploaded = completedBytes;

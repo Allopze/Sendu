@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import apiClient from '../api/client';
 import {
-    Loader2, Trash2, Users, FileText, Settings, Upload, X, Sun, Moon, Image,
-    Mail, Send, HardDrive, FileCode, Shield, Key, Edit2, Check, CheckCircle,
-    XCircle, RefreshCw, LayoutDashboard, Layout, Code
+    Loader2, Trash2, Users, FileText, Settings, X, Image,
+    Mail, Send, HardDrive, Shield, Key, Check, CheckCircle,
+    RefreshCw, Layout, Code, History, ListChecks
 } from 'lucide-react';
 import Toast from '../components/ui/Toast';
 import Tooltip from '../components/ui/Tooltip';
@@ -14,17 +14,54 @@ import { useBranding } from '../context/BrandingContext';
 import { useTheme } from '../context/ThemeContext';
 import EmailTemplateEditor from '../components/admin/EmailTemplateEditor';
 
+const PASSWORD_POLICY_MESSAGE = 'La contrasena debe tener al menos 8 caracteres, incluyendo letras y numeros';
+
+const parseTemplatesSafely = (value) => {
+    if (!value) return null;
+    if (typeof value === 'object') return value;
+    if (typeof value !== 'string') return null;
+    try {
+        return JSON.parse(value);
+    } catch {
+        return null;
+    }
+};
+
+const JOB_TYPE_OPTIONS = [
+    { value: 'all', label: 'Todos' },
+    { value: 'email', label: 'Email' },
+    { value: 'cleanup_files', label: 'Limpieza Archivos' },
+    { value: 'cleanup_chunks', label: 'Limpieza Chunks' },
+    { value: 'branding_convert', label: 'Conversion Branding' },
+    { value: 'thumbnail_generate', label: 'Miniaturas' }
+];
+
+const formatTimestamp = (value) => {
+    const ts = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(ts) || ts <= 0) {
+        return '-';
+    }
+    return new Date(ts).toLocaleString();
+};
+
+const truncateText = (value, maxLen = 120) => {
+    const normalized = value === undefined || value === null ? '' : String(value);
+    if (normalized.length <= maxLen) {
+        return normalized;
+    }
+    return `${normalized.slice(0, maxLen)}...`;
+};
+
 const AdminPage = () => {
     const navigate = useNavigate();
     const { updateSettings: updateBrandingContext } = useBranding();
     const { isDark } = useTheme();
     const [activeTab, setActiveTab] = useState('branding');
-    const [stats, setStats] = useState(null);
     const [users, setUsers] = useState([]);
     const [files, setFiles] = useState([]);
     const [settings, setSettings] = useState({
         logoLight: '', logoDark: '', favicon: '', dropzoneIcon: '', footerText: '',
-        smtpHost: '', smtpPort: '587', smtpSecure: 'false', smtpUser: '', smtpPass: '', smtpFrom: '',
+        smtpHost: '', smtpPort: '587', smtpSecure: 'false', smtpUser: '', smtpPass: '', smtpPassConfigured: false, smtpFrom: '',
         maxFileSize: '100', maxTotalSize: '500', guestUploadLimit: '5120', guestMaxFileSize: '100', chunkSize: '20',
         maxConcurrentUploads: '10', chunkRateLimit: '1000', adaptiveChunkSizing: 'true',
         smallFileThreshold: '100', mediumFileThreshold: '1024', smallFileChunkSize: '10',
@@ -46,6 +83,14 @@ const AdminPage = () => {
     const [editForm, setEditForm] = useState({ email: '', username: '' });
     const [resetPasswordUser, setResetPasswordUser] = useState(null);
     const [newPassword, setNewPassword] = useState('');
+    const [jobStats, setJobStats] = useState({ byStatus: {}, byType: {}, total: 0 });
+    const [pendingJobs, setPendingJobs] = useState([]);
+    const [jobTypeFilter, setJobTypeFilter] = useState('all');
+    const [loadingJobs, setLoadingJobs] = useState(false);
+    const [jobActionRunning, setJobActionRunning] = useState('');
+    const [auditEntries, setAuditEntries] = useState([]);
+    const [auditPagination, setAuditPagination] = useState({ page: 1, limit: 20, total: 0, totalPages: 1 });
+    const [loadingAudit, setLoadingAudit] = useState(false);
     const logoLightRef = useRef(null);
     const logoDarkRef = useRef(null);
     const faviconRef = useRef(null);
@@ -55,25 +100,105 @@ const AdminPage = () => {
 
     const fetchData = async () => {
         try {
-            const [statsRes, usersRes, filesRes, settingsRes] = await Promise.all([
-                apiClient.getAdminStats(), apiClient.getAdminUsers(), apiClient.getAdminFiles(), apiClient.getAdminSettings()
+            const [usersRes, filesRes, settingsRes] = await Promise.all([
+                apiClient.getAdminUsers(), apiClient.getAdminFiles(), apiClient.getAdminSettings()
             ]);
-            if (statsRes.ok) setStats(await statsRes.json());
             if (usersRes.ok) setUsers((await usersRes.json()).users);
             if (filesRes.ok) setFiles((await filesRes.json()).files);
             if (settingsRes.ok) {
                 const data = await settingsRes.json();
-                setSettings(data);
-                setOriginalSettings(data);
+                const normalized = {
+                    ...data,
+                    smtpPass: '',
+                    smtpPassConfigured: Boolean(data.smtpPassConfigured)
+                };
+                setSettings(normalized);
+                setOriginalSettings(normalized);
             }
         } catch (err) { console.error(err); }
         finally { setLoading(false); }
     };
 
+    const readErrorMessage = useCallback(async (res, fallback) => {
+        const data = await res.json().catch(() => ({}));
+        return data.error || fallback;
+    }, []);
+
+    const fetchJobsData = useCallback(async ({ type = jobTypeFilter, showErrorToast = true } = {}) => {
+        setLoadingJobs(true);
+        try {
+            const [statsRes, pendingRes] = await Promise.all([
+                apiClient.getAdminJobStats(),
+                apiClient.getAdminPendingJobs(type, 50)
+            ]);
+
+            if (!statsRes.ok) {
+                throw new Error(await readErrorMessage(statsRes, 'No se pudo cargar el estado de la cola'));
+            }
+            if (!pendingRes.ok) {
+                throw new Error(await readErrorMessage(pendingRes, 'No se pudieron cargar los jobs pendientes'));
+            }
+
+            const statsData = await statsRes.json();
+            const pendingData = await pendingRes.json();
+            setJobStats({
+                byStatus: statsData.byStatus || {},
+                byType: statsData.byType || {},
+                total: Number(statsData.total) || 0
+            });
+            setPendingJobs(Array.isArray(pendingData.jobs) ? pendingData.jobs : []);
+        } catch (err) {
+            if (showErrorToast) {
+                setToast({ message: err.message || 'Error cargando jobs', type: 'error' });
+            }
+        } finally {
+            setLoadingJobs(false);
+        }
+    }, [jobTypeFilter, readErrorMessage]);
+
+    const fetchAuditData = useCallback(async (page = 1, limit = 20, showErrorToast = true) => {
+        setLoadingAudit(true);
+        try {
+            const res = await apiClient.getAdminSettingsAudit(page, limit);
+            if (!res.ok) {
+                throw new Error(await readErrorMessage(res, 'No se pudo cargar la auditoria de settings'));
+            }
+            const data = await res.json();
+            const pagination = data.pagination || {};
+            setAuditEntries(Array.isArray(data.entries) ? data.entries : []);
+            setAuditPagination({
+                page: Number(pagination.page) || page,
+                limit: Number(pagination.limit) || limit,
+                total: Number(pagination.total) || 0,
+                totalPages: Math.max(1, Number(pagination.totalPages) || 1)
+            });
+        } catch (err) {
+            if (showErrorToast) {
+                setToast({ message: err.message || 'Error cargando auditoria', type: 'error' });
+            }
+        } finally {
+            setLoadingAudit(false);
+        }
+    }, [readErrorMessage]);
+
+    useEffect(() => {
+        if (activeTab === 'jobs') {
+            fetchJobsData({ type: jobTypeFilter, showErrorToast: false });
+            return;
+        }
+        if (activeTab === 'audit') {
+            fetchAuditData(1, auditPagination.limit, false);
+        }
+    }, [activeTab, jobTypeFilter, auditPagination.limit, fetchJobsData, fetchAuditData]);
+
     // Check if settings have changed
     const hasChanges = () => {
+        if ((settings.smtpPass || '').trim().length > 0) {
+            return true;
+        }
+
         const keysToCheck = [
-            'footerText', 'smtpHost', 'smtpPort', 'smtpSecure', 'smtpUser', 'smtpPass', 'smtpFrom',
+            'footerText', 'smtpHost', 'smtpPort', 'smtpSecure', 'smtpUser', 'smtpFrom',
             'maxFileSize', 'maxTotalSize', 'guestUploadLimit', 'guestMaxFileSize', 'chunkSize', 'maxConcurrentUploads',
             'chunkRateLimit', 'adaptiveChunkSizing', 'smallFileThreshold', 'mediumFileThreshold',
             'smallFileChunkSize', 'mediumFileChunkSize', 'largeFileChunkSize'
@@ -82,7 +207,7 @@ const AdminPage = () => {
     };
 
     const handleDiscard = () => {
-        setSettings({ ...originalSettings });
+        setSettings({ ...originalSettings, smtpPass: '' });
         navigate('/');
     };
 
@@ -95,7 +220,6 @@ const AdminPage = () => {
                 smtpPort: settings.smtpPort,
                 smtpSecure: settings.smtpSecure,
                 smtpUser: settings.smtpUser,
-                smtpPass: settings.smtpPass,
                 smtpFrom: settings.smtpFrom,
                 maxFileSize: settings.maxFileSize,
                 maxTotalSize: settings.maxTotalSize,
@@ -112,8 +236,23 @@ const AdminPage = () => {
                 largeFileChunkSize: settings.largeFileChunkSize
             };
 
-            await apiClient.updateAdminSettings(settingsToSave);
-            setOriginalSettings({ ...settings });
+            if ((settings.smtpPass || '').trim()) {
+                settingsToSave.smtpPass = settings.smtpPass;
+            }
+
+            const res = await apiClient.updateAdminSettings(settingsToSave);
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.error || 'Error al guardar configuracion');
+            }
+
+            const nextSettings = {
+                ...settings,
+                smtpPass: '',
+                smtpPassConfigured: settings.smtpPassConfigured || Boolean(settingsToSave.smtpPass)
+            };
+            setSettings(nextSettings);
+            setOriginalSettings(nextSettings);
 
             // Update branding context
             const brandingKeys = ['logoLight', 'logoDark', 'favicon', 'footerText'];
@@ -124,8 +263,8 @@ const AdminPage = () => {
             if (Object.keys(brandingUpdate).length > 0) updateBrandingContext(brandingUpdate);
 
             setToast({ message: 'Configuración guardada', type: 'success' });
-        } catch {
-            setToast({ message: 'Error al guardar', type: 'error' });
+        } catch (err) {
+            setToast({ message: err.message || 'Error al guardar', type: 'error' });
         }
         finally { setSaving(false); }
     };
@@ -190,8 +329,9 @@ const AdminPage = () => {
     };
 
     const handleResetPassword = async (userId) => {
-        if (!newPassword || newPassword.length < 6) {
-            setToast({ message: 'La contraseña debe tener al menos 6 caracteres', type: 'error' });
+        const isPasswordValid = newPassword.length >= 8 && /[a-zA-Z]/.test(newPassword) && /[0-9]/.test(newPassword);
+        if (!isPasswordValid) {
+            setToast({ message: PASSWORD_POLICY_MESSAGE, type: 'error' });
             return;
         }
         try {
@@ -315,14 +455,66 @@ const AdminPage = () => {
         }
     };
 
+    const handleJobFilterChange = (nextType) => {
+        setJobTypeFilter(nextType);
+    };
+
+    const handleRetryDeadJobs = async () => {
+        setJobActionRunning('retry-dead');
+        try {
+            const retryType = jobTypeFilter === 'all' ? null : jobTypeFilter;
+            const res = await apiClient.retryDeadJobs(retryType);
+            if (!res.ok) {
+                throw new Error(await readErrorMessage(res, 'No se pudieron reintentar jobs muertos'));
+            }
+            const data = await res.json().catch(() => ({}));
+            setToast({
+                message: data.message || 'Jobs muertos reintentados',
+                type: 'success'
+            });
+            await fetchJobsData({ type: jobTypeFilter, showErrorToast: false });
+        } catch (err) {
+            setToast({ message: err.message || 'Error al reintentar jobs', type: 'error' });
+        } finally {
+            setJobActionRunning('');
+        }
+    };
+
+    const handleCancelJob = async (jobId) => {
+        setJobActionRunning(jobId);
+        try {
+            const res = await apiClient.cancelJob(jobId);
+            if (!res.ok) {
+                throw new Error(await readErrorMessage(res, 'No se pudo cancelar el job'));
+            }
+            setToast({ message: 'Job cancelado', type: 'success' });
+            await fetchJobsData({ type: jobTypeFilter, showErrorToast: false });
+        } catch (err) {
+            setToast({ message: err.message || 'Error al cancelar job', type: 'error' });
+        } finally {
+            setJobActionRunning('');
+        }
+    };
+
+    const handleAuditPageChange = (nextPage) => {
+        if (nextPage < 1 || nextPage > auditPagination.totalPages) {
+            return;
+        }
+        fetchAuditData(nextPage, auditPagination.limit);
+    };
+
     const handleSaveTemplates = async (newSettings) => {
         try {
-            await apiClient.updateAdminSettings(newSettings);
+            const res = await apiClient.updateAdminSettings(newSettings);
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.error || 'Error al guardar plantillas');
+            }
             setSettings(prev => ({ ...prev, ...newSettings }));
             setOriginalSettings(prev => ({ ...prev, ...newSettings }));
             setToast({ message: 'Plantillas guardadas', type: 'success' });
-        } catch {
-            setToast({ message: 'Error al guardar plantillas', type: 'error' });
+        } catch (err) {
+            setToast({ message: err.message || 'Error al guardar plantillas', type: 'error' });
         }
     };
 
@@ -346,6 +538,8 @@ const AdminPage = () => {
         { id: 'templates', label: 'Plantillas Email', icon: Code },
         { id: 'users', label: 'Usuarios', icon: Users },
         { id: 'limits', label: 'Límites', icon: HardDrive },
+        { id: 'jobs', label: 'Cola de Jobs', icon: ListChecks },
+        { id: 'audit', label: 'Auditoría', icon: History },
     ];
 
     // Logo Uploader Component
@@ -462,7 +656,7 @@ const AdminPage = () => {
                         </p>
                         <input
                             type="password"
-                            placeholder="Nueva contraseña (mín. 6 caracteres)"
+                            placeholder="Nueva contrasena (min. 8 caracteres, letras y numeros)"
                             value={newPassword}
                             onChange={(e) => setNewPassword(e.target.value)}
                             className={inputClass}
@@ -694,7 +888,7 @@ const AdminPage = () => {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {files.map((file, index) => (
+                                        {files.map((file) => (
                                             <tr
                                                 key={file.id}
                                                 className={`border-t transition-colors ${isDark ? 'border-white/5 hover:bg-white/5' : 'border-zinc-100 hover:bg-zinc-50'}`}
@@ -863,6 +1057,237 @@ const AdminPage = () => {
                         </div>
                     )}
 
+                    {/* Jobs */}
+                    {activeTab === 'jobs' && (
+                        <div className="animate-enter space-y-6">
+                            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                <div>
+                                    <h2 className={`text-xl font-bold mb-1 ${isDark ? 'text-white' : 'text-zinc-900'}`}>
+                                        Cola de Jobs
+                                    </h2>
+                                    <p className={`text-sm ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                        Estado de la cola asíncrona y control de jobs pendientes
+                                    </p>
+                                </div>
+                                <button
+                                    onClick={() => fetchJobsData({ type: jobTypeFilter })}
+                                    disabled={loadingJobs}
+                                    className={`flex items-center gap-2 px-4 py-2.5 text-sm rounded-xl font-medium transition-colors ${isDark ? 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
+                                >
+                                    {loadingJobs ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                                    Actualizar
+                                </button>
+                            </div>
+
+                            <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+                                {[
+                                    { key: 'pending', label: 'Pendientes' },
+                                    { key: 'processing', label: 'Procesando' },
+                                    { key: 'completed', label: 'Completados' },
+                                    { key: 'failed', label: 'Fallidos' },
+                                    { key: 'dead', label: 'Muertos' }
+                                ].map((item) => (
+                                    <div key={item.key} className={`p-4 rounded-xl border ${isDark ? 'border-white/10 bg-white/5' : 'border-zinc-200 bg-zinc-50'}`}>
+                                        <p className={`text-xs uppercase tracking-wider ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                            {item.label}
+                                        </p>
+                                        <p className={`text-2xl font-bold mt-1 ${isDark ? 'text-white' : 'text-zinc-900'}`}>
+                                            {jobStats.byStatus[item.key] || 0}
+                                        </p>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <div className={`p-5 rounded-2xl ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
+                                <div className="flex flex-col md:flex-row md:items-end gap-4">
+                                    <div className="flex-1">
+                                        <label className={labelClass}>Tipo de Job</label>
+                                        <select
+                                            value={jobTypeFilter}
+                                            onChange={(e) => handleJobFilterChange(e.target.value)}
+                                            className={inputClass}
+                                        >
+                                            {JOB_TYPE_OPTIONS.map((opt) => (
+                                                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <button
+                                        onClick={handleRetryDeadJobs}
+                                        disabled={jobActionRunning === 'retry-dead'}
+                                        className={`flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium transition-colors ${isDark ? 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30' : 'bg-amber-100 text-amber-700 hover:bg-amber-200'} disabled:opacity-50`}
+                                    >
+                                        {jobActionRunning === 'retry-dead' ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                                        Reintentar Jobs Muertos
+                                    </button>
+                                </div>
+
+                                <div className="mt-4 flex flex-wrap gap-2">
+                                    {Object.entries(jobStats.byType || {}).map(([type, count]) => (
+                                        <span
+                                            key={type}
+                                            className={`px-2.5 py-1 rounded-lg text-xs font-medium ${isDark ? 'bg-zinc-800 text-zinc-300' : 'bg-white text-zinc-700 border border-zinc-200'}`}
+                                        >
+                                            {type}: {count}
+                                        </span>
+                                    ))}
+                                    {Object.keys(jobStats.byType || {}).length === 0 && (
+                                        <span className={`text-sm ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                            No hay jobs pendientes por tipo
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className={`rounded-2xl overflow-hidden border ${isDark ? 'border-white/10' : 'border-zinc-200'}`}>
+                                <table className="w-full">
+                                    <thead className={isDark ? 'bg-white/5' : 'bg-zinc-50'}>
+                                        <tr className={`text-left text-sm ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>
+                                            <th className="px-4 py-3 font-semibold">ID</th>
+                                            <th className="px-4 py-3 font-semibold">Tipo</th>
+                                            <th className="px-4 py-3 font-semibold">Prioridad</th>
+                                            <th className="px-4 py-3 font-semibold">Intentos</th>
+                                            <th className="px-4 py-3 font-semibold">Programado</th>
+                                            <th className="px-4 py-3 font-semibold">Payload</th>
+                                            <th className="px-4 py-3 font-semibold w-24"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {pendingJobs.map((job) => {
+                                            const payloadText = truncateText(
+                                                typeof job.payload === 'string' ? job.payload : JSON.stringify(job.payload || {}),
+                                                90
+                                            );
+
+                                            return (
+                                                <tr
+                                                    key={job.id}
+                                                    className={`border-t ${isDark ? 'border-white/5 hover:bg-white/5' : 'border-zinc-100 hover:bg-zinc-50'}`}
+                                                >
+                                                    <td className={`px-4 py-3 text-xs font-mono ${isDark ? 'text-zinc-300' : 'text-zinc-700'}`}>
+                                                        {truncateText(job.id, 24)}
+                                                    </td>
+                                                    <td className={`px-4 py-3 text-sm ${isDark ? 'text-zinc-300' : 'text-zinc-700'}`}>{job.type}</td>
+                                                    <td className={`px-4 py-3 text-sm ${isDark ? 'text-zinc-300' : 'text-zinc-700'}`}>{job.priority ?? 0}</td>
+                                                    <td className={`px-4 py-3 text-sm ${isDark ? 'text-zinc-300' : 'text-zinc-700'}`}>{job.attempts ?? 0}</td>
+                                                    <td className={`px-4 py-3 text-sm ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>{formatTimestamp(job.scheduled_at)}</td>
+                                                    <td className={`px-4 py-3 text-xs ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`} title={typeof job.payload === 'string' ? job.payload : JSON.stringify(job.payload || {})}>
+                                                        {payloadText || '-'}
+                                                    </td>
+                                                    <td className="px-4 py-3 text-right">
+                                                        <button
+                                                            onClick={() => handleCancelJob(job.id)}
+                                                            disabled={jobActionRunning === job.id}
+                                                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${isDark ? 'bg-red-500/20 text-red-300 hover:bg-red-500/30' : 'bg-red-50 text-red-600 hover:bg-red-100'} disabled:opacity-50`}
+                                                        >
+                                                            {jobActionRunning === job.id ? '...' : 'Cancelar'}
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+
+                                {!loadingJobs && pendingJobs.length === 0 && (
+                                    <div className={`text-center py-12 ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                        No hay jobs pendientes para el filtro seleccionado
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Audit */}
+                    {activeTab === 'audit' && (
+                        <div className="animate-enter space-y-6">
+                            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                <div>
+                                    <h2 className={`text-xl font-bold mb-1 ${isDark ? 'text-white' : 'text-zinc-900'}`}>
+                                        Auditoría de Configuración
+                                    </h2>
+                                    <p className={`text-sm ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                        Historial de cambios realizados en settings administrativos
+                                    </p>
+                                </div>
+                                <button
+                                    onClick={() => fetchAuditData(auditPagination.page, auditPagination.limit)}
+                                    disabled={loadingAudit}
+                                    className={`flex items-center gap-2 px-4 py-2.5 text-sm rounded-xl font-medium transition-colors ${isDark ? 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
+                                >
+                                    {loadingAudit ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                                    Actualizar
+                                </button>
+                            </div>
+
+                            <div className={`rounded-2xl overflow-hidden border ${isDark ? 'border-white/10' : 'border-zinc-200'}`}>
+                                <table className="w-full">
+                                    <thead className={isDark ? 'bg-white/5' : 'bg-zinc-50'}>
+                                        <tr className={`text-left text-sm ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>
+                                            <th className="px-4 py-3 font-semibold">Fecha</th>
+                                            <th className="px-4 py-3 font-semibold">Admin</th>
+                                            <th className="px-4 py-3 font-semibold">Setting</th>
+                                            <th className="px-4 py-3 font-semibold">Valor Anterior</th>
+                                            <th className="px-4 py-3 font-semibold">Valor Nuevo</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {auditEntries.map((entry) => (
+                                            <tr
+                                                key={entry.id}
+                                                className={`border-t ${isDark ? 'border-white/5 hover:bg-white/5' : 'border-zinc-100 hover:bg-zinc-50'}`}
+                                            >
+                                                <td className={`px-4 py-3 text-sm ${isDark ? 'text-zinc-300' : 'text-zinc-700'}`}>
+                                                    {formatTimestamp(entry.changedAt)}
+                                                </td>
+                                                <td className={`px-4 py-3 text-sm ${isDark ? 'text-zinc-300' : 'text-zinc-700'}`}>
+                                                    {entry.adminUsername || truncateText(entry.adminUserId, 16) || 'sistema'}
+                                                </td>
+                                                <td className={`px-4 py-3 text-sm font-medium ${isDark ? 'text-zinc-200' : 'text-zinc-900'}`}>
+                                                    {entry.settingKey}
+                                                </td>
+                                                <td className={`px-4 py-3 text-xs ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`} title={entry.oldValue || ''}>
+                                                    {truncateText(entry.oldValue, 70) || '-'}
+                                                </td>
+                                                <td className={`px-4 py-3 text-xs ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`} title={entry.newValue || ''}>
+                                                    {truncateText(entry.newValue, 70) || '-'}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+
+                                {!loadingAudit && auditEntries.length === 0 && (
+                                    <div className={`text-center py-12 ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                        No hay cambios registrados en esta página
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex items-center justify-between">
+                                <p className={`text-sm ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                    Página {auditPagination.page} de {auditPagination.totalPages} · {auditPagination.total} registros
+                                </p>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        onClick={() => handleAuditPageChange(auditPagination.page - 1)}
+                                        disabled={loadingAudit || auditPagination.page <= 1}
+                                        className={`px-3 py-2 rounded-lg text-sm transition-colors ${isDark ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
+                                    >
+                                        Anterior
+                                    </button>
+                                    <button
+                                        onClick={() => handleAuditPageChange(auditPagination.page + 1)}
+                                        disabled={loadingAudit || auditPagination.page >= auditPagination.totalPages}
+                                        className={`px-3 py-2 rounded-lg text-sm transition-colors ${isDark ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
+                                    >
+                                        Siguiente
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {/* SMTP */}
                     {activeTab === 'smtp' && (
                         <div className="animate-enter space-y-6">
@@ -908,7 +1333,18 @@ const AdminPage = () => {
                                     </div>
                                     <div>
                                         <label className={labelClass}>Contraseña</label>
-                                        <input type="password" placeholder="••••••••" className={inputClass} value={settings.smtpPass || ''} onChange={(e) => setSettings({ ...settings, smtpPass: e.target.value })} />
+                                        <input
+                                            type="password"
+                                            placeholder={settings.smtpPassConfigured ? 'Dejar vacio para mantener la contrasena actual' : 'Ingresa la contrasena SMTP'}
+                                            className={inputClass}
+                                            value={settings.smtpPass || ''}
+                                            onChange={(e) => setSettings({ ...settings, smtpPass: e.target.value })}
+                                        />
+                                        {settings.smtpPassConfigured && !settings.smtpPass && (
+                                            <p className={`text-xs mt-2 ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                                Ya hay una contrasena SMTP configurada.
+                                            </p>
+                                        )}
                                     </div>
                                     <div className="md:col-span-2">
                                         <label className={labelClass}>Email Remitente</label>
@@ -959,7 +1395,7 @@ const AdminPage = () => {
                             </div>
                             <div className="flex-1 min-h-0">
                                 <EmailTemplateEditor
-                                    templates={settings.emailTemplates ? JSON.parse(settings.emailTemplates) : null}
+                                    templates={parseTemplatesSafely(settings.emailTemplates)}
                                     onSave={handleSaveTemplates}
                                     onToast={setToast}
                                     logoUrl={settings.logoDark}
@@ -980,7 +1416,7 @@ const AdminPage = () => {
                 </button>
                 <button
                     onClick={handleSaveAll}
-                    disabled={saving}
+                    disabled={saving || !hasChanges()}
                     className="px-6 py-2.5 bg-red-600 text-white rounded-xl hover:bg-red-500 font-medium transition-colors disabled:opacity-50 flex items-center gap-2"
                 >
                     {saving && <Loader2 size={16} className="animate-spin" />}

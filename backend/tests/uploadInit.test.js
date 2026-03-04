@@ -17,6 +17,13 @@ let db;
 let app;
 let startServer;
 
+const extractCsrfToken = (response) => {
+    const cookies = response.headers['set-cookie'] || [];
+    const csrfCookie = cookies.find((cookie) => cookie.startsWith('csrf-token='));
+    if (!csrfCookie) return null;
+    return csrfCookie.split(';')[0].split('=')[1] || null;
+};
+
 describe('Upload Init API', () => {
     beforeAll(async () => {
         const serverModule = await import('../server.js');
@@ -47,13 +54,17 @@ describe('Upload Init API', () => {
 
         const agent = request.agent(app);
         await agent.post('/api/auth/login').send({ login: 'u@example.com', password: 'Password123' });
+        const csrfRes = await agent.get('/api/auth/me');
+        const csrfToken = extractCsrfToken(csrfRes);
 
-        const res = await agent.post('/api/upload/init').send({
-            originalName: 'test.txt',
-            size: 1024,
-            mimeType: 'text/plain',
-            totalChunks: 1
-        });
+        const res = await agent.post('/api/upload/init')
+            .set('x-csrf-token', csrfToken)
+            .send({
+                originalName: 'test.txt',
+                size: 1024,
+                mimeType: 'text/plain',
+                totalChunks: 1
+            });
 
         expect(res.status).toBe(403);
     });
@@ -66,13 +77,17 @@ describe('Upload Init API', () => {
 
         const agent = request.agent(app);
         await agent.post('/api/auth/login').send({ login: 'v@example.com', password: 'Password123' });
+        const csrfRes = await agent.get('/api/auth/me');
+        const csrfToken = extractCsrfToken(csrfRes);
 
-        const res = await agent.post('/api/upload/init').send({
-            originalName: 'test.txt',
-            size: 1024,
-            mimeType: 'text/plain',
-            totalChunks: 1
-        });
+        const res = await agent.post('/api/upload/init')
+            .set('x-csrf-token', csrfToken)
+            .send({
+                originalName: 'test.txt',
+                size: 1024,
+                mimeType: 'text/plain',
+                totalChunks: 1
+            });
 
         expect(res.status).toBe(200);
         expect(res.body.uploadId).toBeDefined();

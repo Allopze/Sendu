@@ -414,18 +414,6 @@ const HomePage = () => {
     // Calcular tamaño total de archivos pendientes
     const totalPendingSize = pendingFiles.reduce((acc, f) => acc + f.file.size, 0);
     
-    // Obtener estructura de carpetas para mostrar
-    const getFolderStructure = () => {
-        const folders = new Set();
-        pendingFiles.forEach(f => {
-            const parts = f.path.split('/');
-            if (parts.length > 1) {
-                folders.add(parts[0]);
-            }
-        });
-        return Array.from(folders);
-    };
-
     // Upload View (with pending files)
     const renderUploadView = () => (
         <div className="flex flex-col h-full animate-enter">

@@ -138,6 +138,24 @@ const migrations = [
             db.exec(`CREATE INDEX IF NOT EXISTS idx_files_expiresAt ON files(expiresAt)`);
             db.exec(`CREATE INDEX IF NOT EXISTS idx_files_createdAt ON files(createdAt)`);
         }
+    },
+    {
+        id: '005_settings_audit_log',
+        up: (db) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS settings_audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    adminUserId TEXT NOT NULL,
+                    settingKey TEXT NOT NULL,
+                    oldValue TEXT,
+                    newValue TEXT,
+                    changedAt INTEGER NOT NULL
+                )
+            `);
+            db.exec(`CREATE INDEX IF NOT EXISTS idx_settings_audit_log_changedAt ON settings_audit_log(changedAt DESC)`);
+            db.exec(`CREATE INDEX IF NOT EXISTS idx_settings_audit_log_adminUserId ON settings_audit_log(adminUserId)`);
+            db.exec(`CREATE INDEX IF NOT EXISTS idx_settings_audit_log_settingKey ON settings_audit_log(settingKey)`);
+        }
     }
 ];
 

@@ -1,17 +1,16 @@
 import { useState } from 'react';
-import { Link, useNavigate, useLocation } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import useAuth from '../../hooks/useAuth';
 import { useTheme } from '../../context/ThemeContext';
 import { useBranding } from '../../context/BrandingContext';
 import { useToast } from '../../context/ToastContext';
-import { Sun, Moon, LogOut, Settings, ChevronDown, Plus, FolderOpen, Shield } from 'lucide-react';
+import { Sun, Moon, LogOut, ChevronDown, FolderOpen, Shield } from 'lucide-react';
 
 const Navbar = () => {
     const { user, logout } = useAuth();
-    const { theme, toggleTheme, isDark } = useTheme();
+    const { toggleTheme, isDark } = useTheme();
     const { settings } = useBranding();
     const navigate = useNavigate();
-    const location = useLocation();
     const toast = useToast();
     const [isUserMenuOpen, setUserMenuOpen] = useState(false);
 
@@ -31,8 +30,6 @@ const Navbar = () => {
         if (!name) return 'U';
         return name.charAt(0).toUpperCase();
     };
-
-    const isActive = (path) => location.pathname === path;
 
     return (
         <nav className="sticky top-0 z-50 w-full p-4 md:p-6 flex justify-between items-center">

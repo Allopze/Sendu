@@ -7,6 +7,10 @@ import { useTheme } from '../context/ThemeContext';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
 
+const isValidPassword = (value) => {
+    return value.length >= 8 && /[a-zA-Z]/.test(value) && /[0-9]/.test(value);
+};
+
 const ResetPasswordPage = () => {
     const [searchParams] = useSearchParams();
     const navigate = useNavigate();
@@ -62,8 +66,8 @@ const ResetPasswordPage = () => {
             return;
         }
 
-        if (password.length < 6) {
-            toast.error('La contraseña debe tener al menos 6 caracteres');
+        if (!isValidPassword(password)) {
+            toast.error('La contrasena debe tener al menos 8 caracteres, incluyendo letras y numeros');
             return;
         }
 
@@ -158,11 +162,11 @@ const ResetPasswordPage = () => {
                     <Input
                         label="Nueva Contraseña"
                         type={showPassword ? 'text' : 'password'}
-                        placeholder="Mínimo 6 caracteres"
+                        placeholder="Minimo 8 caracteres, letras y numeros"
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
                         required
-                        minLength={6}
+                        minLength={8}
                     />
                     <button
                         type="button"

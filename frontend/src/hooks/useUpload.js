@@ -76,7 +76,7 @@ const preloadLimits = async () => {
     }
 };
 
-// Obtener l¡mites; si no hay cach‚, forzar una carga r pida
+// Obtener limites; si no hay cache, forzar una carga rapida
 const loadLimits = async () => {
     const cached = getCachedLimits();
     if (cached) return cached;
@@ -84,7 +84,7 @@ const loadLimits = async () => {
     return getCachedLimits() || DEFAULT_LIMITS;
 };
 
-// Info de red del navegador (si est  disponible)
+// Info de red del navegador (si esta disponible)
 const getConnectionInfo = () => {
     if (typeof navigator === 'undefined') return {};
     const nav = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
@@ -96,7 +96,7 @@ const getConnectionInfo = () => {
     };
 };
 
-// Elegir chunk size considerando tama¤o de archivo, l¡mites y conexi¢n
+// Elegir chunk size considerando tamano de archivo, limites y conexion
 const calculateChunkSizeMB = (fileSizeMB, limits, connectionInfo = {}) => {
     const smallThreshold = parseInt(limits.smallFileThreshold) || 100;
     const mediumThreshold = parseInt(limits.mediumFileThreshold) || 1024;
@@ -118,7 +118,7 @@ const calculateChunkSizeMB = (fileSizeMB, limits, connectionInfo = {}) => {
         chunkSizeMB = parseInt(limits.chunkSize) || mediumChunk;
     }
 
-    // Ajuste seg£n calidad de conexi¢n
+    // Ajuste segun calidad de conexion
     const { downlink, effectiveType } = connectionInfo;
     if (downlink) {
         if (downlink >= 80) {
@@ -142,7 +142,7 @@ const calculateChunkSizeMB = (fileSizeMB, limits, connectionInfo = {}) => {
     return Math.max(4, Math.min(Math.round(chunkSizeMB), maxAllowed));
 };
 
-// Concurrencia adaptativa seg£n conexi¢n
+// Concurrencia adaptativa segun conexion
 const calculateConcurrency = (limits, connectionInfo = {}) => {
     let concurrency = parseInt(limits.maxConcurrentUploads) || 6;
     const { downlink, effectiveType } = connectionInfo;
@@ -167,7 +167,7 @@ const calculateConcurrency = (limits, connectionInfo = {}) => {
     return Math.max(1, Math.min(concurrency, 10));
 };
 
-// Timeout din mico en funci¢n del tama¤o del chunk (protege conexiones lentas)
+// Timeout dinamico en funcion del tamano del chunk (protege conexiones lentas)
 const getChunkTimeoutMs = (chunkSizeMB) => {
     const perMbBudgetMs = 4000; // 4s por MB => soporta ~0.25MB/s antes del cap
     const dynamicTimeout = chunkSizeMB * perMbBudgetMs;
@@ -220,7 +220,7 @@ const useUpload = () => {
                 new URL('../workers/uploadWorker.js', import.meta.url),
                 { type: 'module' }
             );
-        } catch (e) {
+        } catch {
             console.warn('Web Worker not available, using main thread');
         }
 
@@ -323,7 +323,7 @@ const useUpload = () => {
             try {
                 await apiClient.cancelUpload(uploadIdRef.current);
                 clearUploadState(uploadIdRef.current);
-            } catch (e) {
+            } catch {
                 // Ignore errors during cleanup
             }
             uploadIdRef.current = null;
@@ -563,7 +563,7 @@ const useUpload = () => {
                     chunk, 
                     chunkTimeoutMs,
                     abortControllerRef.current?.signal,
-                    (loaded, total) => {
+                    (loaded) => {
                         // Actualizar bytes parciales de este chunk
                         inProgressBytes.set(chunkIndex, loaded);
                         

@@ -1,3 +1,4 @@
+import { Suspense, lazy } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
@@ -7,15 +8,23 @@ import { UploadProvider } from './context/UploadContext';
 import Layout from './components/layout/Layout';
 import { ProtectedRoute, AdminRoute, GuestRoute } from './components/auth/ProtectedRoute';
 import UploadProgressToast from './components/ui/UploadProgressToast';
-import LoginPage from './pages/LoginPage';
-import RegisterPage from './pages/RegisterPage';
-import HomePage from './pages/HomePage';
-import DashboardPage from './pages/DashboardPage';
-import AdminPage from './pages/AdminPage';
-import DownloadPage from './pages/DownloadPage';
-import VerifyEmailPage from './pages/VerifyEmailPage';
-import ForgotPasswordPage from './pages/ForgotPasswordPage';
-import ResetPasswordPage from './pages/ResetPasswordPage';
+import { Loader2 } from 'lucide-react';
+
+const LoginPage = lazy(() => import('./pages/LoginPage'));
+const RegisterPage = lazy(() => import('./pages/RegisterPage'));
+const HomePage = lazy(() => import('./pages/HomePage'));
+const DashboardPage = lazy(() => import('./pages/DashboardPage'));
+const AdminPage = lazy(() => import('./pages/AdminPage'));
+const DownloadPage = lazy(() => import('./pages/DownloadPage'));
+const VerifyEmailPage = lazy(() => import('./pages/VerifyEmailPage'));
+const ForgotPasswordPage = lazy(() => import('./pages/ForgotPasswordPage'));
+const ResetPasswordPage = lazy(() => import('./pages/ResetPasswordPage'));
+
+const RouteLoader = () => (
+  <div className="flex items-center justify-center py-16">
+    <Loader2 className="h-8 w-8 animate-spin text-zinc-500" />
+  </div>
+);
 
 
 function App() {
@@ -26,20 +35,22 @@ function App() {
           <ToastProvider>
             <BrowserRouter>
               <UploadProvider>
-                <Routes>
-                  <Route path="/" element={<Layout />}>
-                    <Route index element={<HomePage />} />
-                    <Route path="login" element={<GuestRoute><LoginPage /></GuestRoute>} />
-                    <Route path="register" element={<GuestRoute><RegisterPage /></GuestRoute>} />
-                    <Route path="forgot-password" element={<GuestRoute><ForgotPasswordPage /></GuestRoute>} />
-                    <Route path="reset-password" element={<ResetPasswordPage />} />
-                    <Route path="verify" element={<VerifyEmailPage />} />
-                    <Route path="dashboard" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
-                    <Route path="admin" element={<AdminRoute><AdminPage /></AdminRoute>} />
-                    <Route path="share/:id" element={<DownloadPage />} />
-                    <Route path="*" element={<Navigate to="/" replace />} />
-                  </Route>
-                </Routes>
+                <Suspense fallback={<RouteLoader />}>
+                  <Routes>
+                    <Route path="/" element={<Layout />}>
+                      <Route index element={<HomePage />} />
+                      <Route path="login" element={<GuestRoute><LoginPage /></GuestRoute>} />
+                      <Route path="register" element={<GuestRoute><RegisterPage /></GuestRoute>} />
+                      <Route path="forgot-password" element={<GuestRoute><ForgotPasswordPage /></GuestRoute>} />
+                      <Route path="reset-password" element={<ResetPasswordPage />} />
+                      <Route path="verify" element={<VerifyEmailPage />} />
+                      <Route path="dashboard" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
+                      <Route path="admin" element={<AdminRoute><AdminPage /></AdminRoute>} />
+                      <Route path="share/:id" element={<DownloadPage />} />
+                      <Route path="*" element={<Navigate to="/" replace />} />
+                    </Route>
+                  </Routes>
+                </Suspense>
                 <UploadProgressToast />
               </UploadProvider>
             </BrowserRouter>

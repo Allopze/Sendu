@@ -7,6 +7,10 @@ import { UserPlus } from 'lucide-react';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
 
+const isValidPassword = (value) => {
+    return value.length >= 8 && /[a-zA-Z]/.test(value) && /[0-9]/.test(value);
+};
+
 const RegisterPage = () => {
     const [formData, setFormData] = useState({ email: '', username: '', password: '' });
     const [loading, setLoading] = useState(false);
@@ -17,6 +21,12 @@ const RegisterPage = () => {
 
     const handleSubmit = async (e) => {
         e.preventDefault();
+
+        if (!isValidPassword(formData.password)) {
+            toast.error('La contrasena debe tener al menos 8 caracteres, incluyendo letras y numeros');
+            return;
+        }
+
         setLoading(true);
         
         const res = await register(formData);
@@ -29,7 +39,7 @@ const RegisterPage = () => {
             if (res.error?.includes('already') || res.error?.includes('existe') || res.error?.includes('registered')) {
                 toast.error('Este email o usuario ya está registrado');
             } else if (res.error?.includes('password') || res.error?.includes('contraseña')) {
-                toast.error('La contraseña debe tener al menos 6 caracteres');
+                toast.error('La contrasena debe tener al menos 8 caracteres, incluyendo letras y numeros');
             } else if (res.error?.includes('email') || res.error?.includes('correo')) {
                 toast.error('Ingresa un email válido');
             } else {

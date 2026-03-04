@@ -105,10 +105,24 @@ const apiClient = {
     getAdminUsers: () => fetch(`${API_BASE}/admin/users`, { credentials: 'include' }),
     getAdminFiles: () => fetch(`${API_BASE}/admin/files`, { credentials: 'include' }),
     getAdminSettings: () => fetch(`${API_BASE}/admin/settings`, { credentials: 'include' }),
+    getAdminSettingsAudit: (page = 1, limit = 20) => fetch(`${API_BASE}/admin/settings/audit?page=${page}&limit=${limit}`, { credentials: 'include' }),
+    getAdminJobStats: () => fetch(`${API_BASE}/admin/jobs/stats`, { credentials: 'include' }),
+    getAdminPendingJobs: (type = 'all', limit = 20) => {
+        const queryType = encodeURIComponent(type || 'all');
+        return fetch(`${API_BASE}/admin/jobs/pending?type=${queryType}&limit=${limit}`, { credentials: 'include' });
+    },
     updateAdminSettings: (data) => fetchWithCsrf(`${API_BASE}/admin/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
+    }),
+    retryDeadJobs: (type) => fetchWithCsrf(`${API_BASE}/admin/jobs/retry-dead`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(type ? { type } : {})
+    }),
+    cancelJob: (id) => fetchWithCsrf(`${API_BASE}/admin/jobs/${id}/cancel`, {
+        method: 'POST'
     }),
     // User management
     updateUser: (id, data) => fetchWithCsrf(`${API_BASE}/admin/users/${id}`, {

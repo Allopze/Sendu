@@ -28,7 +28,7 @@ const DownloadPage = () => {
                     const err = await res.json();
                     setError(err.error || 'Archivo no encontrado');
                 }
-            } catch (err) {
+            } catch {
                 setError('Error al cargar información del archivo');
             } finally {
                 setLoading(false);

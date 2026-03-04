@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
 export default function Tooltip({ children, text, position = 'top' }) {
@@ -6,36 +6,30 @@ export default function Tooltip({ children, text, position = 'top' }) {
     const [coords, setCoords] = useState({ top: 0, left: 0 });
     const triggerRef = useRef(null);
 
-    useEffect(() => {
-        if (show && triggerRef.current) {
-            const rect = triggerRef.current.getBoundingClientRect();
-            const tooltipOffset = 8;
-            
-            let top, left;
-            
-            switch (position) {
-                case 'bottom':
-                    top = rect.bottom + tooltipOffset;
-                    left = rect.left + rect.width / 2;
-                    break;
-                case 'left':
-                    top = rect.top + rect.height / 2;
-                    left = rect.left - tooltipOffset;
-                    break;
-                case 'right':
-                    top = rect.top + rect.height / 2;
-                    left = rect.right + tooltipOffset;
-                    break;
-                case 'top':
-                default:
-                    top = rect.top - tooltipOffset;
-                    left = rect.left + rect.width / 2;
-                    break;
-            }
-            
-            setCoords({ top, left });
+    const updateCoords = () => {
+        if (!triggerRef.current) {
+            return;
         }
-    }, [show, position]);
+
+        const rect = triggerRef.current.getBoundingClientRect();
+        const tooltipOffset = 8;
+
+        switch (position) {
+            case 'bottom':
+                setCoords({ top: rect.bottom + tooltipOffset, left: rect.left + rect.width / 2 });
+                return;
+            case 'left':
+                setCoords({ top: rect.top + rect.height / 2, left: rect.left - tooltipOffset });
+                return;
+            case 'right':
+                setCoords({ top: rect.top + rect.height / 2, left: rect.right + tooltipOffset });
+                return;
+            case 'top':
+            default:
+                setCoords({ top: rect.top - tooltipOffset, left: rect.left + rect.width / 2 });
+                return;
+        }
+    };
 
     const getTransformClasses = () => {
         switch (position) {
@@ -63,7 +57,10 @@ export default function Tooltip({ children, text, position = 'top' }) {
             <div 
                 ref={triggerRef}
                 className="inline-flex"
-                onMouseEnter={() => setShow(true)}
+                onMouseEnter={() => {
+                    updateCoords();
+                    setShow(true);
+                }}
                 onMouseLeave={() => setShow(false)}
             >
                 {children}

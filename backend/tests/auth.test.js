@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { stopJobProcessor } from '../lib/jobQueue.js';
 
 process.env.NODE_ENV = 'test';
 process.env.ALLOW_PUBLIC_REGISTRATION = 'true';
@@ -28,6 +29,7 @@ describe('Auth API', () => {
     });
 
     afterAll(() => {
+        stopJobProcessor();
         if (db && db.close) {
             db.close();
         }
