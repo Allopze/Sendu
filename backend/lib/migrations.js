@@ -128,6 +128,15 @@ const migrations = [
             } catch (err) {
                 logger.warn('Migration 003 failed', { error: err.message });
             }
+        },
+    },
+    {
+        id: '004_files_indexes',
+        up: (db) => {
+            // Improve query performance for user files and cleanup
+            db.exec(`CREATE INDEX IF NOT EXISTS idx_files_userId ON files(userId)`);
+            db.exec(`CREATE INDEX IF NOT EXISTS idx_files_expiresAt ON files(expiresAt)`);
+            db.exec(`CREATE INDEX IF NOT EXISTS idx_files_createdAt ON files(createdAt)`);
         }
     }
 ];

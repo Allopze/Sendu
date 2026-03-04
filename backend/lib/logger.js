@@ -95,7 +95,7 @@ const logger = winston.createLogger({
 const SENSITIVE_PARAMS = ['token', 'resetToken', 'verifyToken', 'code', 'password', 'secret'];
 
 // Sensitive body fields to redact in error logs
-const SENSITIVE_BODY_FIELDS = ['password', 'passwordHash', 'token', 'secret', 'creditCard', 'ssn'];
+const SENSITIVE_BODY_FIELDS = ['password', 'passwordHash', 'token', 'secret', 'creditCard', 'ssn', 'email'];
 
 /**
  * Anonymize IP address for privacy (mask last octet for IPv4, last 80 bits for IPv6)

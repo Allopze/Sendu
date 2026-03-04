@@ -1,4 +1,6 @@
 import logger, { anonymizeIp, sanitizeObject } from './logger.js';
+import { closeDatabase } from './database.js';
+import { metrics } from './metrics.js';
 
 /**
  * Global error handler middleware
@@ -102,16 +104,33 @@ export class AppError extends Error {
  * Setup process-level error handlers
  * @param {object} server - HTTP server instance (optional, for graceful shutdown)
  */
-export const setupProcessErrorHandlers = (server = null) => {
+export const setupProcessErrorHandlers = (server = null, { stopJobProcessor } = {}) => {
     // Handle unhandled promise rejections
+    let unhandledRejectionCount = 0;
+    const MAX_UNHANDLED_REJECTIONS = 10;
+    const REJECTION_WINDOW_MS = 60 * 1000; // 1 minute
+    let rejectionWindowStart = Date.now();
+
     process.on('unhandledRejection', (reason, promise) => {
         logger.error('Unhandled Promise Rejection', {
             reason: reason instanceof Error ? reason.message : reason,
             stack: reason instanceof Error ? reason.stack : undefined
         });
-        
-        // In production, log and continue
-        // In development, you might want to exit
+
+        // Reset counter if window has elapsed
+        const now = Date.now();
+        if (now - rejectionWindowStart > REJECTION_WINDOW_MS) {
+            unhandledRejectionCount = 0;
+            rejectionWindowStart = now;
+        }
+        unhandledRejectionCount++;
+
+        // Exit if too many unhandled rejections in a short window (likely systemic failure)
+        if (unhandledRejectionCount >= MAX_UNHANDLED_REJECTIONS) {
+            logger.error(`${MAX_UNHANDLED_REJECTIONS} unhandled rejections in ${REJECTION_WINDOW_MS / 1000}s — exiting`);
+            process.exit(1);
+        }
+
         if (process.env.NODE_ENV !== 'production') {
             console.error('Unhandled Rejection:', reason);
         }
@@ -141,33 +160,36 @@ export const setupProcessErrorHandlers = (server = null) => {
         }
     });
     
-    // Handle SIGTERM for graceful shutdown
-    process.on('SIGTERM', () => {
-        logger.info('SIGTERM received, shutting down gracefully');
-        
+    const gracefulShutdown = (signal) => {
+        logger.info(`${signal} received, shutting down gracefully`);
+
+        const cleanup = () => {
+            try { metrics.saveSnapshot(); } catch {}
+            try { if (stopJobProcessor) stopJobProcessor(); } catch {}
+            try { closeDatabase(); logger.info('Database closed'); } catch {}
+            process.exit(0);
+        };
+
         if (server) {
             server.close(() => {
                 logger.info('Server closed');
-                process.exit(0);
+                cleanup();
             });
+            // Force exit after 30 seconds if connections don't drain
+            setTimeout(() => {
+                logger.warn('Forced exit after 30 s timeout');
+                process.exit(1);
+            }, 30000).unref();
         } else {
-            process.exit(0);
+            cleanup();
         }
-    });
+    };
+
+    // Handle SIGTERM for graceful shutdown
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
     
     // Handle SIGINT (Ctrl+C)
-    process.on('SIGINT', () => {
-        logger.info('SIGINT received, shutting down gracefully');
-        
-        if (server) {
-            server.close(() => {
-                logger.info('Server closed');
-                process.exit(0);
-            });
-        } else {
-            process.exit(0);
-        }
-    });
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 };
 
 export default {

@@ -7,6 +7,7 @@ import compression from 'compression';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import fsPromises from 'fs/promises';
@@ -29,7 +30,7 @@ import { runWithLock, getCleanupIntervalWithJitter } from './lib/cleanupCoordina
 import { initDatabase, saveDatabase, closeDatabase } from './lib/database.js';
 import { invalidateUploadCache } from './lib/uploadCache.js';
 import { createChunkRouter } from './chunkRouter.js';
-import { initJobQueue, enqueueEmail, enqueueCleanup, enqueueBrandingConversion, getQueueStats, JOB_TYPES } from './lib/jobQueue.js';
+import { initJobQueue, enqueueEmail, enqueueCleanup, enqueueBrandingConversion, getQueueStats, stopJobProcessor, JOB_TYPES } from './lib/jobQueue.js';
 import { initJobHandlers } from './lib/jobHandlers.js';
 import { metrics } from './lib/metrics.js';
 import { runMigrations } from './lib/migrations.js';
@@ -57,11 +58,24 @@ const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || 'http://localhost:5174';
 const ALLOW_PUBLIC_REGISTRATION = process.env.ALLOW_PUBLIC_REGISTRATION === 'true';
 const ADMIN_BOOTSTRAP_TOKEN = process.env.ADMIN_BOOTSTRAP_TOKEN || null;
 // Support multiple origins (comma-separated in env var)
-const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS 
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
     ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
     : [PUBLIC_ORIGIN];
 const isProduction = process.env.NODE_ENV === 'production';
 const isTest = process.env.NODE_ENV === 'test';
+
+// Timing-safe string comparison (prevents timing attacks on tokens)
+const safeCompare = (a, b) => {
+    if (typeof a !== 'string' || typeof b !== 'string') return false;
+    const bufA = Buffer.from(a);
+    const bufB = Buffer.from(b);
+    if (bufA.length !== bufB.length) {
+        // Compare against self to maintain constant time regardless of length
+        crypto.timingSafeEqual(bufA, bufA);
+        return false;
+    }
+    return crypto.timingSafeEqual(bufA, bufB);
+};
 
 // Database Setup - Use data directory for persistence
 // MiniPaaS provides APP_DATA_PATH for persistent storage
@@ -136,9 +150,62 @@ const getMaxChunkSizeFromSettingsSync = () => {
     }
 };
 
+// Centralized settings cache with prepared statement
+// Reduces repeated db.prepare() calls throughout the codebase
+const settingsCache = new Map();
+const SETTINGS_CACHE_TTL = 30000; // 30 seconds
+let getSettingStmt = null;
+
+const getSetting = (key, defaultValue = null) => {
+    const now = Date.now();
+    const cached = settingsCache.get(key);
+
+    if (cached && (now - cached.ts) < SETTINGS_CACHE_TTL) {
+        return cached.value;
+    }
+
+    if (!db) return defaultValue;
+
+    try {
+        // Lazy init prepared statement (db may not exist at module load time)
+        if (!getSettingStmt) {
+            getSettingStmt = db.prepare('SELECT value FROM settings WHERE key = ?');
+        }
+        const row = getSettingStmt.get(key);
+        const value = row ? row.value : defaultValue;
+        settingsCache.set(key, { value, ts: now });
+        return value;
+    } catch {
+        return defaultValue;
+    }
+};
+
+// Invalidate cache when settings are updated
+const invalidateSettingsCache = (keys = null) => {
+    if (keys) {
+        keys.forEach(k => settingsCache.delete(k));
+    } else {
+        settingsCache.clear();
+    }
+    // Also invalidate related caches
+    maxChunkSizeCache.ts = 0;
+    uploadLimitsCache.ts = 0;
+};
+
 // Helper: Get upload limits from settings (used by chunk router)
 // Needs to be defined before chunk router
+// Cache with 30s TTL to reduce DB queries during uploads
+let uploadLimitsCache = { value: null, ts: 0 };
+const UPLOAD_LIMITS_CACHE_TTL = 30000; // 30 seconds
+
 const getUploadLimits = () => {
+    const now = Date.now();
+
+    // Return cached value if still valid
+    if (uploadLimitsCache.value && (now - uploadLimitsCache.ts) < UPLOAD_LIMITS_CACHE_TTL) {
+        return uploadLimitsCache.value;
+    }
+
     const limits = {
         maxFileSize: 100,        // Default 100MB for registered users
         maxTotalSize: 500,       // Default 500MB total for registered users
@@ -152,6 +219,9 @@ const getUploadLimits = () => {
         const stmt = db.prepare(`SELECT * FROM settings WHERE key IN (${keys.map(() => '?').join(',')})`);
         const settings = stmt.all(...keys);
         settings.forEach(s => limits[s.key] = parseInt(s.value) || limits[s.key]);
+
+        // Cache the result
+        uploadLimitsCache = { value: limits, ts: now };
     } catch {
         return limits;
     }
@@ -161,16 +231,16 @@ const getUploadLimits = () => {
 
 // Minimal CORS for chunk uploads in development
 const chunkCorsOptions = {
-    origin: isProduction 
+    origin: isProduction
         ? ALLOWED_ORIGINS
         : [
-            'http://localhost:5173', 
+            'http://localhost:5173',
             'http://localhost:5174',
             'http://localhost:2000',
             'http://localhost:2001',
             'http://localhost:2002',
             'http://localhost:3000'
-          ],
+        ],
     credentials: true
 };
 
@@ -194,8 +264,8 @@ const chunkRateLimiter = isTest ? noopLimiter : rateLimit({
             const value = setting ? parseInt(setting.value) || 1000 : 1000;
             chunkRateLimitCache = { value, ts: now };
             return value;
-        } catch { 
-            return chunkRateLimitCache.value; 
+        } catch {
+            return chunkRateLimitCache.value;
         }
     },
     message: { error: 'Demasiadas solicitudes de subida. Espera un momento e intenta de nuevo.' }
@@ -213,7 +283,7 @@ const chunkRouter = createChunkRouter({
 });
 
 // Apply minimal middleware only to chunk route
-app.use('/api/upload/chunk', 
+app.use('/api/upload/chunk',
     cors(chunkCorsOptions),
     chunkRateLimiter,
     chunkRouter
@@ -261,16 +331,16 @@ app.use(helmet({
 app.use(compression()); // Gzip compression for responses
 app.use(cookieParser()); // Required for CSRF
 app.use(cors({
-    origin: isProduction 
+    origin: isProduction
         ? ALLOWED_ORIGINS
         : [
-            'http://localhost:5173', 
+            'http://localhost:5173',
             'http://localhost:5174',
             'http://localhost:2000',
             'http://localhost:2001',
             'http://localhost:2002',
             'http://localhost:3000'
-          ],
+        ],
     credentials: true
 }));
 app.use(express.json());
@@ -348,6 +418,15 @@ app.use('/api/', (req, res, next) => {
     csrfMiddleware(req, res, next);
 });
 
+// Health check endpoint (no auth, no rate limit - for load balancers)
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        timestamp: Date.now(),
+        uptime: process.uptime()
+    });
+});
+
 // Rate Limiting - General API (skip chunk uploads and public endpoints)
 // NOTE: Uses in-memory store by default. For multi-replica deployments with strict
 // rate limiting, consider using Redis or the SQLite store from persistentStores.js
@@ -363,9 +442,9 @@ const limiter = rateLimit({
         if (req.session?.role === 'admin') return true;
         // Exclude chunk uploads and frequently called public endpoints
         return req.path.startsWith('/upload/chunk') ||
-               req.path === '/settings/public' ||
-               req.path === '/settings/limits' ||
-               req.path === '/auth/me';
+            req.path === '/settings/public' ||
+            req.path === '/settings/limits' ||
+            req.path === '/auth/me';
     },
     message: { error: 'Demasiadas solicitudes. Espera un momento.' }
 });
@@ -413,7 +492,7 @@ const downloadValidateLimiter = isTest ? noopLimiter : rateLimit({
 if (process.env.NODE_ENV === 'production') {
     const staticPath = path.join(rootDir, 'frontend/dist');
     const publicPath = path.join(rootDir, 'public'); // For prebuilt releases
-    
+
     const staticOptions = {
         setHeaders: (res, filePath) => {
             if (filePath.endsWith('.html')) {
@@ -425,7 +504,7 @@ if (process.env.NODE_ENV === 'production') {
             }
         }
     };
-    
+
     // Try frontend/dist first, then public (for prebuilt releases)
     if (fs.existsSync(staticPath)) {
         app.use(express.static(staticPath, staticOptions));
@@ -487,7 +566,7 @@ const getSmtpConfig = () => {
     const settings = db.prepare('SELECT key, value FROM settings WHERE key LIKE ?').all('smtp%');
     const config = {};
     const sensitiveKeys = ['smtpPass'];
-    settings.forEach(s => { 
+    settings.forEach(s => {
         // Decrypt sensitive values
         if (sensitiveKeys.includes(s.key) && isEncrypted(s.value)) {
             config[s.key] = decrypt(s.value);
@@ -514,28 +593,43 @@ const getEmailTemplates = () => {
     return DEFAULT_EMAIL_TEMPLATES;
 };
 
+// HTML-escape helper to prevent XSS in email templates
+const escapeHtml = (str) => {
+    if (!str || typeof str !== 'string') return str || '';
+    return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+};
+
 // Helper: Replace variables in template
 const replaceTemplateVariables = (template, variables) => {
     let result = template;
-    
+
     // Handle {{#if variable}}...{{else}}...{{/if}} blocks
-    result = result.replace(/\{\{#if\s+(\w+)\}\}([\s\S]*?)\{\{else\}\}([\s\S]*?)\{\{\/if\}\}/g, 
+    result = result.replace(/\{\{#if\s+(\w+)\}\}([\s\S]*?)\{\{else\}\}([\s\S]*?)\{\{\/if\}\}/g,
         (match, varName, ifContent, elseContent) => {
             return variables[varName] ? ifContent : elseContent;
         }
     );
-    
+
     // Handle {{#if variable}}...{{/if}} blocks (without else)
-    result = result.replace(/\{\{#if\s+(\w+)\}\}([\s\S]*?)\{\{\/if\}\}/g, 
+    result = result.replace(/\{\{#if\s+(\w+)\}\}([\s\S]*?)\{\{\/if\}\}/g,
         (match, varName, ifContent) => {
             return variables[varName] ? ifContent : '';
         }
     );
-    
-    // Replace simple variables
+
+    // Variables that should NOT be escaped (contain trusted HTML/URLs)
+    const rawVariables = new Set(['verificationLink', 'resetLink', 'downloadLink', 'logoUrl', 'appUrl']);
+
+    // Replace simple variables (HTML-escaped unless in rawVariables set)
     Object.entries(variables).forEach(([key, value]) => {
         const regex = new RegExp(`{{${key}}}`, 'g');
-        result = result.replace(regex, value || '');
+        const safeValue = rawVariables.has(key) ? (value || '') : escapeHtml(value);
+        result = result.replace(regex, safeValue);
     });
     return result;
 };
@@ -546,12 +640,12 @@ const createSmtpTransporter = () => {
     if (!config.smtpHost || !config.smtpUser || !config.smtpPass) {
         return null;
     }
-    
+
     const port = parseInt(config.smtpPort) || 587;
     // Puerto 465 usa SSL directo (secure: true)
     // Puerto 587 usa STARTTLS (secure: false, pero TLS se negocia)
     const secure = port === 465;
-    
+
     return nodemailer.createTransport({
         host: config.smtpHost,
         port: port,
@@ -569,12 +663,12 @@ const createSmtpTransporter = () => {
 const sendEmail = async (to, subject, text, html = null) => {
     const config = getSmtpConfig();
     const transporter = createSmtpTransporter();
-    
+
     if (!transporter) {
         logger.info('Email sent (mock mode)', { to, subject });
         return { success: true, mock: true };
     }
-    
+
     const mailOptions = {
         from: config.smtpFrom || config.smtpUser,
         to,
@@ -582,7 +676,7 @@ const sendEmail = async (to, subject, text, html = null) => {
         text,
         ...(html && { html })
     };
-    
+
     return transporter.sendMail(mailOptions);
 };
 
@@ -591,7 +685,7 @@ const sendTemplatedEmail = async (to, templateName, variables = {}, options = {}
     const templates = getEmailTemplates();
     const config = getSmtpConfig();
     const smtpConfigured = !!(config.smtpHost && config.smtpUser && config.smtpPass);
-    
+
     // Helper to ensure absolute URL
     const ensureAbsoluteUrl = (url) => {
         if (!url) return null;
@@ -601,14 +695,14 @@ const sendTemplatedEmail = async (to, templateName, variables = {}, options = {}
         // Make relative URL absolute
         return `${PUBLIC_ORIGIN}${url.startsWith('/') ? '' : '/'}${url.split('?')[0]}`;
     };
-    
+
     // Get logo URL from branding settings - use dark theme for emails (dark header background)
     // Prefer PNG version for emails (better compatibility with email clients)
     const logoDarkEmailSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('logoDarkEmail');
     const logoDarkSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('logoDark');
     const logoLightEmailSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('logoLightEmail');
     const logoLightSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('logoLight');
-    
+
     let logoUrl;
     // Priority: logoDarkEmail > logoDark > logoLightEmail > logoLight > default
     if (logoDarkEmailSetting?.value) {
@@ -623,7 +717,7 @@ const sendTemplatedEmail = async (to, templateName, variables = {}, options = {}
         // No logo configured, use empty string so alt text shows
         logoUrl = '';
     }
-    
+
     // Default app variables
     const appVars = {
         appName: 'Sendu',
@@ -631,9 +725,9 @@ const sendTemplatedEmail = async (to, templateName, variables = {}, options = {}
         logoUrl,
         ...variables
     };
-    
+
     let subject, html;
-    
+
     if (!templates || !templates[templateName]) {
         // Fallback to simple text email
         subject = replaceTemplateVariables(variables.subject || 'Notificación', appVars);
@@ -643,7 +737,7 @@ const sendTemplatedEmail = async (to, templateName, variables = {}, options = {}
         subject = replaceTemplateVariables(template.subject, appVars);
         html = replaceTemplateVariables(template.html, appVars);
     }
-    
+
     // If SMTP is not configured, skip queueing to avoid noisy job failures
     if (!smtpConfigured) {
         logger.warn('SMTP not configured, skipping email queue', { to, templateName });
@@ -655,15 +749,21 @@ const sendTemplatedEmail = async (to, templateName, variables = {}, options = {}
         // For testing or when immediate feedback is needed
         return sendEmail(to, subject, html.replace(/<[^>]*>/g, ''), html);
     }
-    
+
     // Queue the email for background processing
     const jobId = enqueueEmail(to, subject, html, {
         from: config.smtpFrom || config.smtpUser,
         priority: options.priority,
     });
-    
+
     logger.debug('Email queued', { to, templateName, jobId });
     return { queued: true, jobId };
+};
+
+// Auth Middleware
+const requireAuth = (req, res, next) => {
+    if (!req.session.userId) return res.status(401).json({ error: 'No autenticado' });
+    next();
 };
 
 // Validation helpers
@@ -684,20 +784,20 @@ const isValidPassword = (password) => {
 };
 
 // Auth Routes
-app.post('/api/auth/register', asyncHandler(async (req, res) => {
+app.post('/api/auth/register', authLimiter, asyncHandler(async (req, res) => {
     const { email, username, password, adminBootstrapToken } = req.body;
     if (!email || !username || !password) return res.status(400).json({ error: 'Faltan campos requeridos' });
-    
+
     // Validate email format
     if (!isValidEmail(email)) {
         return res.status(400).json({ error: 'Formato de email inválido' });
     }
-    
+
     // Validate username format
     if (!isValidUsername(username)) {
         return res.status(400).json({ error: 'El nombre de usuario debe tener 3-30 caracteres alfanuméricos' });
     }
-    
+
     // Validate password strength
     if (!isValidPassword(password)) {
         return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres, incluyendo letras y números' });
@@ -716,18 +816,18 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
         if (!ADMIN_BOOTSTRAP_TOKEN) {
             return res.status(403).json({ error: 'Registro público deshabilitado' });
         }
-        if (!adminBootstrapToken || adminBootstrapToken !== ADMIN_BOOTSTRAP_TOKEN || bootstrapCompleted) {
+        if (!adminBootstrapToken || !safeCompare(adminBootstrapToken, ADMIN_BOOTSTRAP_TOKEN) || bootstrapCompleted) {
             return res.status(403).json({ error: 'Registro público deshabilitado' });
         }
         bootstrapRequested = true;
-    } else if (adminBootstrapToken && ADMIN_BOOTSTRAP_TOKEN && adminBootstrapToken === ADMIN_BOOTSTRAP_TOKEN && !bootstrapCompleted) {
+    } else if (adminBootstrapToken && ADMIN_BOOTSTRAP_TOKEN && safeCompare(adminBootstrapToken, ADMIN_BOOTSTRAP_TOKEN) && !bootstrapCompleted) {
         bootstrapRequested = true;
     }
 
     try {
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const hashedPassword = await bcrypt.hash(password, 12);
         const userId = uuidv4();
-        
+
         // Generate secure verification token (store hash, send plain token)
         const { token: verificationToken, hash: verificationTokenHash } = generateSecureToken();
         const verificationTokenExpires = Date.now() + (24 * 60 * 60 * 1000); // 24 hours
@@ -765,7 +865,7 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
 app.post('/api/auth/login', authLimiter, asyncHandler(async (req, res) => {
     const { login, password } = req.body; // login can be email or username
     if (!login || !password) return res.status(400).json({ error: 'Faltan campos requeridos' });
-    
+
     // Basic input validation
     if (login.length > 255 || password.length > 255) {
         return res.status(400).json({ error: 'Datos de entrada inválidos' });
@@ -786,22 +886,22 @@ app.post('/api/auth/login', authLimiter, asyncHandler(async (req, res) => {
                 logger.error('Error regenerating session', { error: err.message });
                 return res.status(500).json({ error: 'Error interno del servidor' });
             }
-            
+
             // Restore any session data that should persist (if any)
             req.session.userId = user.id;
-            
+
             // Explicitly save session to ensure it's persisted before responding
             req.session.save((saveErr) => {
                 if (saveErr) {
                     logger.error('Error saving session after login', { error: saveErr.message });
                     return res.status(500).json({ error: 'Error interno del servidor' });
                 }
-                
-                logger.info('User logged in successfully', { 
-                    userId: user.id, 
+
+                logger.info('User logged in successfully', {
+                    userId: user.id,
                     sessionId: (req.session.id || req.sessionID)?.substring(0, 8) + '...'
                 });
-                
+
                 res.json({ message: 'Sesión iniciada correctamente', user: { id: user.id, username: user.username, email: user.email, role: user.role } });
             });
         });
@@ -825,15 +925,15 @@ app.get('/api/auth/me', (req, res) => {
     // Debug logging for session issues
     const sessionId = req.session?.id || req.sessionID;
     const hasSessionCookie = !!(req.cookies?.[process.env.SESSION_COOKIE_NAME || 'sendu.sid']);
-    
-    logger.debug('Auth check', { 
+
+    logger.debug('Auth check', {
         hasSessionCookie,
         sessionId: sessionId ? sessionId.substring(0, 8) + '...' : 'none',
         userId: req.session?.userId || 'none',
         cookieSecure: sessionCookieSecure,
         cookieSameSite: sessionCookieSameSite
     });
-    
+
     if (!req.session.userId) return res.status(401).json({ error: 'No autenticado' });
 
     const stmt = db.prepare('SELECT id, username, email, role, isVerified FROM users WHERE id = ?');
@@ -846,46 +946,46 @@ app.get('/api/auth/me', (req, res) => {
 // Email verification endpoint
 app.get('/api/auth/verify', (req, res) => {
     const { token } = req.query;
-    
+
     if (!token) {
         return res.status(400).json({ error: 'Token de verificación requerido' });
     }
-    
+
     try {
         // Hash the token to compare with stored hash
         const tokenHash = hashToken(token);
-        logger.debug('Verification attempt', { 
+        logger.debug('Verification attempt', {
             tokenLength: token.length,
             tokenHashStart: tokenHash.substring(0, 16) + '...'
         });
-        
+
         const user = db.prepare('SELECT id, email, verificationToken, verificationTokenExpires, isVerified FROM users WHERE verificationToken = ?').get(tokenHash);
-        
+
         if (!user) {
             // Debug: Check if any user has a similar token stored
             const allUsers = db.prepare('SELECT id, email, verificationToken, isVerified FROM users WHERE verificationToken IS NOT NULL').all();
-            logger.debug('No user found with token', { 
+            logger.debug('No user found with token', {
                 searchedHash: tokenHash.substring(0, 16) + '...',
                 usersWithTokens: allUsers.length,
                 storedHashes: allUsers.map(u => u.verificationToken?.substring(0, 16) + '...')
             });
             return res.status(400).json({ error: 'Token de verificación inválido o expirado' });
         }
-        
+
         logger.debug('User found for verification', { userId: user.id, email: user.email });
-        
+
         // Check expiration
         if (user.verificationTokenExpires && Date.now() > user.verificationTokenExpires) {
             return res.status(400).json({ error: 'El token de verificación ha expirado' });
         }
-        
+
         if (user.isVerified) {
             return res.json({ message: 'El email ya está verificado', alreadyVerified: true });
         }
-        
+
         // Mark user as verified and clear token
         db.prepare('UPDATE users SET isVerified = 1, verificationToken = NULL, verificationTokenExpires = NULL WHERE id = ?').run(user.id);
-        
+
         res.json({ message: 'Email verificado correctamente', success: true });
     } catch (err) {
         logger.error('Error', { error: err.message, stack: err.stack });
@@ -896,29 +996,29 @@ app.get('/api/auth/verify', (req, res) => {
 // Request password reset
 app.post('/api/auth/forgot-password', passwordResetLimiter, asyncHandler(async (req, res) => {
     const { email } = req.body;
-    
+
     if (!email) {
         return res.status(400).json({ error: 'Email requerido' });
     }
-    
+
     if (!isValidEmail(email)) {
         return res.status(400).json({ error: 'Formato de email inválido' });
     }
-    
+
     try {
         const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-        
+
         // Always return success to prevent email enumeration
         if (!user) {
             return res.json({ message: 'Si el email existe, recibirás un enlace para restablecer tu contraseña' });
         }
-        
+
         // Generate secure reset token (store hash, send plain token)
         const { token: resetToken, hash: resetTokenHash } = generateSecureToken();
         const resetTokenExpires = Date.now() + (60 * 60 * 1000); // 1 hour
-        
+
         db.prepare('UPDATE users SET resetToken = ?, resetTokenExpires = ? WHERE id = ?').run(resetTokenHash, resetTokenExpires, user.id);
-        
+
         // Send password reset email
         const resetLink = `${PUBLIC_ORIGIN}/reset-password?token=${resetToken}`;
         await sendTemplatedEmail(email, 'passwordReset', {
@@ -926,7 +1026,7 @@ app.post('/api/auth/forgot-password', passwordResetLimiter, asyncHandler(async (
             email: user.email,
             resetLink
         });
-        
+
         res.json({ message: 'Si el email existe, recibirás un enlace para restablecer tu contraseña' });
     } catch (err) {
         logger.error('Error', { error: err.message, stack: err.stack });
@@ -937,24 +1037,24 @@ app.post('/api/auth/forgot-password', passwordResetLimiter, asyncHandler(async (
 // Validate reset token
 app.get('/api/auth/reset-password/validate', (req, res) => {
     const { token } = req.query;
-    
+
     if (!token) {
         return res.status(400).json({ error: 'Token requerido', valid: false });
     }
-    
+
     try {
         // Hash the token to compare with stored hash
         const tokenHash = hashToken(token);
         const user = db.prepare('SELECT * FROM users WHERE resetToken = ?').get(tokenHash);
-        
+
         if (!user) {
             return res.status(400).json({ error: 'Token inválido', valid: false });
         }
-        
+
         if (user.resetTokenExpires && Date.now() > user.resetTokenExpires) {
             return res.status(400).json({ error: 'El token ha expirado', valid: false });
         }
-        
+
         res.json({ valid: true, username: user.username });
     } catch (err) {
         logger.error('Error', { error: err.message, stack: err.stack });
@@ -965,32 +1065,32 @@ app.get('/api/auth/reset-password/validate', (req, res) => {
 // Reset password with token
 app.post('/api/auth/reset-password', asyncHandler(async (req, res) => {
     const { token, password } = req.body;
-    
+
     if (!token || !password) {
         return res.status(400).json({ error: 'Token y contraseña requeridos' });
     }
-    
+
     if (!isValidPassword(password)) {
         return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres, incluyendo letras y números' });
     }
-    
+
     try {
         // Hash the token to compare with stored hash
         const tokenHash = hashToken(token);
         const user = db.prepare('SELECT * FROM users WHERE resetToken = ?').get(tokenHash);
-        
+
         if (!user) {
             return res.status(400).json({ error: 'Token inválido o expirado' });
         }
-        
+
         if (user.resetTokenExpires && Date.now() > user.resetTokenExpires) {
             return res.status(400).json({ error: 'El token ha expirado' });
         }
-        
+
         // Update password and clear reset token
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const hashedPassword = await bcrypt.hash(password, 12);
         db.prepare('UPDATE users SET passwordHash = ?, resetToken = NULL, resetTokenExpires = NULL WHERE id = ?').run(hashedPassword, user.id);
-        
+
         res.json({ message: 'Contraseña actualizada correctamente', success: true });
     } catch (err) {
         logger.error('Error', { error: err.message, stack: err.stack });
@@ -999,26 +1099,25 @@ app.post('/api/auth/reset-password', asyncHandler(async (req, res) => {
 }));
 
 // Resend verification email
-app.post('/api/auth/resend-verification', asyncHandler(async (req, res) => {
-    if (!req.session.userId) return res.status(401).json({ error: 'No autenticado' });
-    
+app.post('/api/auth/resend-verification', requireAuth, asyncHandler(async (req, res) => {
+
     try {
         const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.userId);
-        
+
         if (!user) {
             return res.status(404).json({ error: 'Usuario no encontrado' });
         }
-        
+
         if (user.isVerified) {
             return res.status(400).json({ error: 'El email ya está verificado' });
         }
-        
+
         // Generate new verification token (store hash, send plain token)
         const { token: verificationToken, hash: verificationTokenHash } = generateSecureToken();
         const verificationTokenExpires = Date.now() + (24 * 60 * 60 * 1000); // 24 hours
-        
+
         db.prepare('UPDATE users SET verificationToken = ?, verificationTokenExpires = ? WHERE id = ?').run(verificationTokenHash, verificationTokenExpires, user.id);
-        
+
         // Send verification email
         const verificationLink = `${PUBLIC_ORIGIN}/verify?token=${verificationToken}`;
         await sendTemplatedEmail(user.email, 'verification', {
@@ -1026,7 +1125,7 @@ app.post('/api/auth/resend-verification', asyncHandler(async (req, res) => {
             email: user.email,
             verificationLink
         });
-        
+
         res.json({ message: 'Email de verificación reenviado' });
     } catch (err) {
         logger.error('Error', { error: err.message, stack: err.stack });
@@ -1076,7 +1175,7 @@ const ALLOWED_MIME_PREFIXES = [
     'application/json',
     'application/xml',
     'application/javascript',
-    'application/octet-stream', // Generic binary (for unknown types)
+    // application/octet-stream removed — too permissive (bypasses allowlist)
     'application/vnd.openxmlformats-officedocument', // Office docs
     'application/vnd.ms-',      // MS Office
     'application/msword',
@@ -1100,25 +1199,31 @@ const validateMimeType = (mimeType, filename) => {
     if (BLOCKED_EXTENSIONS.includes(ext)) {
         return { valid: false, reason: `Tipo de archivo no permitido: ${ext}` };
     }
-    
+
     // Check MIME type against allowlist
     if (!mimeType) {
         return { valid: true }; // Allow if no MIME type (will be treated as octet-stream)
     }
-    
+
     const normalizedMime = mimeType.toLowerCase();
+
+    // Allow octet-stream only when file extension is not blocked (secondary check)
+    if (normalizedMime === 'application/octet-stream') {
+        return { valid: true };
+    }
+
     const isAllowed = ALLOWED_MIME_PREFIXES.some(prefix => normalizedMime.startsWith(prefix));
-    
+
     if (!isAllowed) {
         return { valid: false, reason: `Tipo MIME no permitido: ${mimeType}` };
     }
-    
+
     return { valid: true };
 };
 
 app.post('/api/upload/init', asyncHandler(async (req, res) => {
-    const { originalName, size, mimeType, totalChunks } = req.body;
-    
+    const { originalName, size, mimeType, totalChunks, checksum } = req.body;
+
     // Validate required fields
     if (!originalName || typeof originalName !== 'string') {
         return res.status(400).json({ error: 'Nombre de archivo requerido' });
@@ -1129,19 +1234,19 @@ app.post('/api/upload/init', asyncHandler(async (req, res) => {
     if (!totalChunks || typeof totalChunks !== 'number' || totalChunks <= 0) {
         return res.status(400).json({ error: 'Número de chunks inválido' });
     }
-    
+
     // Sanitize filename (remove path traversal attempts)
     const sanitizedName = path.basename(originalName).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
     if (!sanitizedName || sanitizedName === '.' || sanitizedName === '..') {
         return res.status(400).json({ error: 'Nombre de archivo inválido' });
     }
-    
+
     // Validate MIME type and extension
     const mimeValidation = validateMimeType(mimeType, sanitizedName);
     if (!mimeValidation.valid) {
         return res.status(400).json({ error: mimeValidation.reason });
     }
-    
+
     // Validate file size against limits (different for guests vs registered users)
     const limits = getUploadLimits();
     const isLoggedIn = !!req.session.userId;
@@ -1160,20 +1265,20 @@ app.post('/api/upload/init', asyncHandler(async (req, res) => {
     let ipFingerprint = null;
     const effectiveMaxFileSize = isLoggedIn ? limits.maxFileSize : limits.guestMaxFileSize;
     const maxFileSizeBytes = effectiveMaxFileSize * 1024 * 1024;
-    
+
     if (size > maxFileSizeBytes) {
-        const message = isLoggedIn 
+        const message = isLoggedIn
             ? `El archivo excede el límite de ${effectiveMaxFileSize}MB`
             : `El archivo excede el límite de ${effectiveMaxFileSize}MB para invitados. Inicia sesión para subir archivos más grandes.`;
         return res.status(400).json({ error: message });
     }
-    
+
     // Check total storage quota for authenticated users
     if (req.session.userId) {
         const maxTotalSizeBytes = limits.maxTotalSize * 1024 * 1024;
         const userTotalStmt = db.prepare('SELECT COALESCE(SUM(size), 0) as totalSize FROM files WHERE userId = ?');
         const { totalSize } = userTotalStmt.get(req.session.userId);
-        
+
         if (totalSize + size > maxTotalSizeBytes) {
             const usedMB = Math.round(totalSize / (1024 * 1024));
             return res.status(400).json({
@@ -1184,17 +1289,17 @@ app.post('/api/upload/init', asyncHandler(async (req, res) => {
             });
         }
     }
-    
+
     // Check guest upload limit for non-logged users
     if (!req.session.userId) {
         guestFingerprint = generateFingerprint(req);
         ipFingerprint = getIpFingerprint(req);
         const guestLimitBytes = limits.guestUploadLimit * 1024 * 1024;
-        
+
         // Check both fingerprints (user might try different browsers)
         const check1 = canGuestUpload(guestFingerprint, size, guestLimitBytes);
         const check2 = canGuestUpload(ipFingerprint, size, guestLimitBytes);
-        
+
         if (!check1.allowed || !check2.allowed) {
             return res.status(429).json({
                 error: check1.message || check2.message,
@@ -1208,7 +1313,7 @@ app.post('/api/upload/init', asyncHandler(async (req, res) => {
     if (!ipFingerprint) {
         ipFingerprint = getIpFingerprint(req);
     }
-    
+
     // Enforce backend concurrency limit
     const maxConcurrent = getMaxConcurrentUploads();
     if (isLoggedIn) {
@@ -1232,7 +1337,7 @@ app.post('/api/upload/init', asyncHandler(async (req, res) => {
 
     const uploadId = uuidv4();
     const uploadPath = path.join(CHUNKS_DIR, uploadId);
-    
+
     // Validate expires field (must be a positive integer representing days, max 365 days)
     let validatedExpires = null;
     if (req.body.expires !== undefined && req.body.expires !== null && req.body.expires !== '') {
@@ -1242,12 +1347,32 @@ app.post('/api/upload/init', asyncHandler(async (req, res) => {
         }
         validatedExpires = expiresValue;
     }
-    
+
+    // Validate maxDownloads field (must be a positive integer, max 10000)
+    let validatedMaxDownloads = null;
+    if (req.body.maxDownloads !== undefined && req.body.maxDownloads !== null && req.body.maxDownloads !== '') {
+        const maxDownloadsValue = parseInt(req.body.maxDownloads, 10);
+        if (isNaN(maxDownloadsValue) || maxDownloadsValue < 1 || maxDownloadsValue > 10000) {
+            return res.status(400).json({ error: 'El límite de descargas debe ser entre 1 y 10000' });
+        }
+        validatedMaxDownloads = maxDownloadsValue;
+    }
+
     // Hash password immediately if provided (don't store plaintext even temporarily)
     // Use a lower cost factor for the temporary hash to avoid blocking
     let passwordHash = null;
     if (req.body.password && typeof req.body.password === 'string' && req.body.password.trim()) {
-        passwordHash = await bcrypt.hash(req.body.password.trim(), 10);
+        passwordHash = await bcrypt.hash(req.body.password.trim(), 12);
+    }
+
+    // Validate checksum format if provided (SHA-256 hex)
+    let validatedChecksum = null;
+    if (checksum && typeof checksum === 'string') {
+        if (/^[a-f0-9]{64}$/i.test(checksum)) {
+            validatedChecksum = checksum.toLowerCase();
+        } else {
+            return res.status(400).json({ error: 'Formato de checksum inválido (se espera SHA-256 hex)' });
+        }
     }
 
     await fsPromises.mkdir(uploadPath, { recursive: true });
@@ -1261,7 +1386,9 @@ app.post('/api/upload/init', asyncHandler(async (req, res) => {
         ipFingerprint: req.session.userId ? null : ipFingerprint,
         createdAt: Date.now(),
         expires: validatedExpires,
-        passwordHash // Store hash, not plaintext
+        maxDownloads: validatedMaxDownloads,
+        passwordHash, // Store hash, not plaintext
+        checksum: validatedChecksum
     }));
 
     const now = Date.now();
@@ -1279,7 +1406,7 @@ app.post('/api/upload/init', asyncHandler(async (req, res) => {
 
 // Multer with dynamic file size limit based on chunk size setting
 // We use a generous limit (200MB) to support large adaptive chunks
-const upload = multer({ 
+const upload = multer({
     dest: TEMP_DIR,
     limits: {
         fileSize: 200 * 1024 * 1024 // 200MB max to support large chunks
@@ -1307,7 +1434,7 @@ const handleMulterError = (err, req, res, next) => {
 
 app.post('/api/upload/complete', asyncHandler(async (req, res) => {
     const { uploadId } = req.body;
-    
+
     if (!uploadId) {
         return res.status(400).json({ error: 'Se requiere el ID de subida' });
     }
@@ -1315,7 +1442,7 @@ app.post('/api/upload/complete', asyncHandler(async (req, res) => {
     if (!/^[a-f0-9-]{36}$/i.test(uploadId)) {
         return res.status(400).json({ error: 'ID de subida inválido' });
     }
-    
+
     // Invalidar caché inmediatamente
     invalidateUploadCache(uploadId);
 
@@ -1337,7 +1464,7 @@ app.post('/api/upload/complete', asyncHandler(async (req, res) => {
     if (statusUpdate.changes === 0) {
         return res.status(409).json({ error: 'Subida en proceso, intenta de nuevo' });
     }
-    
+
     const uploadPath = path.join(CHUNKS_DIR, uploadId);
 
     try {
@@ -1367,7 +1494,7 @@ app.post('/api/upload/complete', asyncHandler(async (req, res) => {
     } catch (err) {
         logger.warn('Disk space check failed', { error: err.message });
     }
-    
+
     const finalFileId = uuidv4();
     const finalPath = path.join(UPLOAD_DIR, finalFileId);
     const tempPath = path.join(UPLOAD_DIR, `${finalFileId}.tmp`);
@@ -1382,10 +1509,10 @@ app.post('/api/upload/complete', asyncHandler(async (req, res) => {
                 throw new Error(`Missing chunk ${i}`);
             }
         }
-        
+
         // Assemble file using streams to avoid loading entire file into memory
         const writeStream = fs.createWriteStream(tempPath);
-        
+
         for (let i = 0; i < meta.totalChunks; i++) {
             const chunkPath = path.join(uploadPath, `${i}.part`);
             await new Promise((resolve, reject) => {
@@ -1395,7 +1522,7 @@ app.post('/api/upload/complete', asyncHandler(async (req, res) => {
                 readStream.pipe(writeStream, { end: false });
             });
         }
-        
+
         // Close the write stream
         await new Promise((resolve, reject) => {
             writeStream.on('finish', resolve);
@@ -1410,25 +1537,51 @@ app.post('/api/upload/complete', asyncHandler(async (req, res) => {
         if (meta.expires) {
             // expires is already validated as integer in /init
             expiresAt = Date.now() + (meta.expires * 24 * 60 * 60 * 1000);
+        } else {
+            // Apply server-wide default retention if configured
+            const defaultRetention = db.prepare('SELECT value FROM settings WHERE key = ?').get('defaultRetentionDays');
+            if (defaultRetention?.value) {
+                const days = parseInt(defaultRetention.value, 10);
+                if (days > 0 && days <= 365) {
+                    expiresAt = Date.now() + (days * 24 * 60 * 60 * 1000);
+                }
+            }
         }
 
         // Use the password hash stored during /init (already hashed, no plaintext)
         const passwordHash = meta.passwordHash || null;
 
-        // Verify final file size matches expected size
+        // Verify final file size matches expected size (strict)
         const finalStats = await fsPromises.stat(tempPath);
         if (finalStats.size !== meta.size) {
-            logger.warn('File size mismatch', { 
-                expected: meta.size, 
-                actual: finalStats.size, 
-                uploadId 
+            logger.warn('File size mismatch', {
+                expected: meta.size,
+                actual: finalStats.size,
+                uploadId
             });
-            // Allow small difference (< 1KB) for edge cases
-            if (Math.abs(finalStats.size - meta.size) > 1024) {
+            await fsPromises.unlink(tempPath);
+            db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('failed', Date.now(), uploadId);
+            return res.status(400).json({
+                error: 'El tamaño del archivo no coincide con lo esperado. Por favor, intenta de nuevo.'
+            });
+        }
+
+        // Verify checksum if provided during /init (SHA-256)
+        if (meta.checksum) {
+            const hash = crypto.createHash('sha256');
+            const stream = fs.createReadStream(tempPath);
+            await new Promise((resolve, reject) => {
+                stream.on('data', (chunk) => hash.update(chunk));
+                stream.on('end', resolve);
+                stream.on('error', reject);
+            });
+            const computed = hash.digest('hex');
+            if (computed !== meta.checksum) {
+                logger.warn('Checksum mismatch', { expected: meta.checksum, actual: computed, uploadId });
                 await fsPromises.unlink(tempPath);
                 db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('failed', Date.now(), uploadId);
-                return res.status(400).json({ 
-                    error: 'El tamaño del archivo no coincide con lo esperado. Por favor, intenta de nuevo.' 
+                return res.status(400).json({
+                    error: 'El checksum del archivo no coincide. El archivo puede estar corrupto.'
                 });
             }
         }
@@ -1440,7 +1593,7 @@ app.post('/api/upload/complete', asyncHandler(async (req, res) => {
             if (detected?.mime) {
                 detectedMime = detected.mime;
             }
-        } catch {}
+        } catch { }
 
         const mimeValidation = validateMimeType(detectedMime, meta.originalName);
         if (!mimeValidation.valid) {
@@ -1465,16 +1618,23 @@ app.post('/api/upload/complete', asyncHandler(async (req, res) => {
             }
         }
 
-        const stmt = db.prepare(`
-            INSERT INTO files (id, originalName, serverPath, mimeType, size, createdAt, userId, expiresAt, passwordHash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-        stmt.run(finalFileId, meta.originalName, finalPath, detectedMime || meta.mimeType, meta.size, Date.now(), meta.userId, expiresAt, passwordHash);
-
+        // Rename file to final path first, then insert DB record
+        // (if crash occurs between rename and INSERT, cleanup will remove orphan files)
         try {
             await fsPromises.rename(tempPath, finalPath);
         } catch (err) {
-            db.prepare('DELETE FROM files WHERE id = ?').run(finalFileId);
+            throw err;
+        }
+
+        const stmt = db.prepare(`
+            INSERT INTO files (id, originalName, serverPath, mimeType, size, createdAt, userId, expiresAt, maxDownloads, passwordHash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        try {
+            stmt.run(finalFileId, meta.originalName, finalPath, detectedMime || meta.mimeType, meta.size, Date.now(), meta.userId, expiresAt, meta.maxDownloads || null, passwordHash);
+        } catch (err) {
+            // Rollback: remove renamed file if DB insert fails
+            try { await fsPromises.unlink(finalPath); } catch {}
             throw err;
         }
 
@@ -1498,10 +1658,10 @@ app.post('/api/upload/complete', asyncHandler(async (req, res) => {
         // Clean up on error
         try {
             await fsPromises.rm(uploadPath, { recursive: true, force: true });
-        } catch {}
+        } catch { }
         try {
             await fsPromises.unlink(tempPath);
-        } catch {}
+        } catch { }
         db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('failed', Date.now(), uploadId);
         res.status(500).json({ error: err.message || 'Error al completar la subida' });
     }
@@ -1510,21 +1670,21 @@ app.post('/api/upload/complete', asyncHandler(async (req, res) => {
 // Cancel upload and clean up chunks
 app.post('/api/upload/cancel', asyncHandler(async (req, res) => {
     const { uploadId } = req.body;
-    
+
     if (!uploadId) {
         return res.status(400).json({ error: 'Se requiere el ID de subida' });
     }
-    
+
     // Validate uploadId format to prevent path traversal
     if (!/^[a-f0-9-]{36}$/i.test(uploadId)) {
         return res.status(400).json({ error: 'ID de subida inválido' });
     }
-    
+
     // Invalidar caché inmediatamente
     invalidateUploadCache(uploadId);
-    
+
     const uploadPath = path.join(CHUNKS_DIR, uploadId);
-    
+
     try {
         await fsPromises.rm(uploadPath, { recursive: true, force: true });
         db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('cancelled', Date.now(), uploadId);
@@ -1607,7 +1767,7 @@ app.post('/api/download/:id/validate', downloadValidateLimiter, async (req, res)
     if (!file.passwordHash) {
         return res.status(400).json({ error: 'Este archivo no requiere contraseña' });
     }
-    
+
     if (!password) return res.status(401).json({ error: 'Contraseña requerida' });
     const match = await bcrypt.compare(password, file.passwordHash);
     if (!match) return res.status(401).json({ error: 'Contraseña incorrecta' });
@@ -1653,7 +1813,7 @@ app.get('/api/download/:id', async (req, res) => {
         if (!token) {
             return res.status(401).json({ error: 'Se requiere autenticación para este archivo' });
         }
-        
+
         // Validate token from SQLite store (single-use)
         if (!validateDownloadToken(token, id)) {
             return res.status(401).json({ error: 'Token inválido o expirado' });
@@ -1675,7 +1835,7 @@ app.get('/api/download/:id', async (req, res) => {
 });
 
 // Legacy POST download (kept for backwards compatibility)
-app.post('/api/download/:id', async (req, res) => {
+app.post('/api/download/:id', downloadValidateLimiter, async (req, res) => {
     const { id } = req.params;
     const { password } = req.body;
 
@@ -1711,23 +1871,22 @@ app.post('/api/download/:id', async (req, res) => {
 });
 
 // User Files Route (with pagination)
-app.get('/api/user/files', (req, res) => {
-    if (!req.session.userId) return res.status(401).json({ error: 'No autenticado' });
-    
+app.get('/api/user/files', requireAuth, (req, res) => {
+
     // Pagination
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const offset = (page - 1) * limit;
-    
+
     // Get total count
     const countStmt = db.prepare('SELECT COUNT(*) as total FROM files WHERE userId = ?');
     const { total } = countStmt.get(req.session.userId);
-    
+
     // Get paginated files
     const stmt = db.prepare('SELECT * FROM files WHERE userId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?');
     const files = stmt.all(req.session.userId, limit, offset);
 
-    res.json({ 
+    res.json({
         files,
         pagination: {
             page,
@@ -1738,8 +1897,7 @@ app.get('/api/user/files', (req, res) => {
     });
 });
 
-app.delete('/api/files/:id', asyncHandler(async (req, res) => {
-    if (!req.session.userId) return res.status(401).json({ error: 'No autenticado' });
+app.delete('/api/files/:id', requireAuth, asyncHandler(async (req, res) => {
 
     const { id } = req.params;
     const stmt = db.prepare('SELECT * FROM files WHERE id = ?');
@@ -1797,7 +1955,7 @@ app.get('/api/admin/users', requireAdmin, (req, res) => {
 app.put('/api/admin/users/:id', requireAdmin, (req, res) => {
     const { id } = req.params;
     const { email, username } = req.body;
-    
+
     // Validate email format
     if (!email || typeof email !== 'string') {
         return res.status(400).json({ error: 'Email requerido' });
@@ -1806,7 +1964,7 @@ app.put('/api/admin/users/:id', requireAdmin, (req, res) => {
     if (!emailRegex.test(email) || email.length > 255) {
         return res.status(400).json({ error: 'Formato de email inválido' });
     }
-    
+
     // Validate username format (alphanumeric, underscores, 3-30 chars)
     if (!username || typeof username !== 'string') {
         return res.status(400).json({ error: 'Username requerido' });
@@ -1815,7 +1973,7 @@ app.put('/api/admin/users/:id', requireAdmin, (req, res) => {
     if (!usernameRegex.test(username)) {
         return res.status(400).json({ error: 'Username inválido (3-30 caracteres alfanuméricos o guion bajo)' });
     }
-    
+
     try {
         const stmt = db.prepare('UPDATE users SET email = ?, username = ? WHERE id = ?');
         stmt.run(email.toLowerCase().trim(), username.trim(), id);
@@ -1832,12 +1990,12 @@ app.put('/api/admin/users/:id', requireAdmin, (req, res) => {
 // Delete user
 app.delete('/api/admin/users/:id', requireAdmin, asyncHandler(async (req, res) => {
     const { id } = req.params;
-    
+
     // Prevent deleting yourself
     if (id === req.session.userId) {
         return res.status(400).json({ error: 'No puedes eliminarte a ti mismo' });
     }
-    
+
     try {
         // Delete user's files first
         const userFiles = db.prepare('SELECT id, serverPath FROM files WHERE userId = ?').all(id);
@@ -1851,7 +2009,7 @@ app.delete('/api/admin/users/:id', requireAdmin, asyncHandler(async (req, res) =
             }
         }
         db.prepare('DELETE FROM files WHERE userId = ?').run(id);
-        
+
         // Delete user
         db.prepare('DELETE FROM users WHERE id = ?').run(id);
         res.json({ message: 'Usuario eliminado' });
@@ -1864,16 +2022,16 @@ app.delete('/api/admin/users/:id', requireAdmin, asyncHandler(async (req, res) =
 // Toggle user role (admin/user)
 app.post('/api/admin/users/:id/toggle-role', requireAdmin, (req, res) => {
     const { id } = req.params;
-    
+
     // Prevent changing your own role
     if (id === req.session.userId) {
         return res.status(400).json({ error: 'No puedes cambiar tu propio rol' });
     }
-    
+
     try {
         const user = db.prepare('SELECT role FROM users WHERE id = ?').get(id);
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-        
+
         const newRole = user.role === 'admin' ? 'user' : 'admin';
         db.prepare('UPDATE users SET role = ? WHERE id = ?').run(newRole, id);
         res.json({ message: 'Rol actualizado', role: newRole });
@@ -1886,11 +2044,11 @@ app.post('/api/admin/users/:id/toggle-role', requireAdmin, (req, res) => {
 // Toggle user verified status
 app.post('/api/admin/users/:id/toggle-verified', requireAdmin, (req, res) => {
     const { id } = req.params;
-    
+
     try {
         const user = db.prepare('SELECT isVerified FROM users WHERE id = ?').get(id);
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-        
+
         const newVerified = user.isVerified ? 0 : 1;
         db.prepare('UPDATE users SET isVerified = ? WHERE id = ?').run(newVerified, id);
         res.json({ message: 'Estado de verificación actualizado', isVerified: newVerified });
@@ -1904,13 +2062,13 @@ app.post('/api/admin/users/:id/toggle-verified', requireAdmin, (req, res) => {
 app.post('/api/admin/users/:id/reset-password', requireAdmin, async (req, res) => {
     const { id } = req.params;
     const { password } = req.body;
-    
+
     if (!password || !isValidPassword(password)) {
         return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres, incluyendo letras y números' });
     }
-    
+
     try {
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const hashedPassword = await bcrypt.hash(password, 12);
         db.prepare('UPDATE users SET passwordHash = ? WHERE id = ?').run(hashedPassword, id);
         res.json({ message: 'Contraseña actualizada' });
     } catch (err) {
@@ -1922,41 +2080,41 @@ app.post('/api/admin/users/:id/reset-password', requireAdmin, async (req, res) =
 // Admin: Send verification email to user
 app.post('/api/admin/users/:id/send-verification', requireAdmin, asyncHandler(async (req, res) => {
     const { id } = req.params;
-    
+
     try {
         const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-        
+
         if (user.isVerified) {
             return res.status(400).json({ error: 'El usuario ya está verificado' });
         }
-        
+
         // Generate new verification token (store hash, send plain token)
         const { token: verificationToken, hash: verificationTokenHash } = generateSecureToken();
         const verificationTokenExpires = Date.now() + (24 * 60 * 60 * 1000); // 24 hours
-        
+
         db.prepare('UPDATE users SET verificationToken = ?, verificationTokenExpires = ? WHERE id = ?').run(verificationTokenHash, verificationTokenExpires, id);
-        
-        logger.info('Verification token updated for user', { 
-            userId: id, 
+
+        logger.info('Verification token updated for user', {
+            userId: id,
             email: user.email,
             tokenHashStart: verificationTokenHash.substring(0, 16) + '...',
             expires: new Date(verificationTokenExpires).toISOString()
         });
-        
+
         // Send verification email
         const verificationLink = `${PUBLIC_ORIGIN}/verify?token=${verificationToken}`;
-        logger.debug('Verification link generated', { 
+        logger.debug('Verification link generated', {
             link: verificationLink.substring(0, 50) + '...',
             tokenStart: verificationToken.substring(0, 16) + '...'
         });
-        
+
         await sendTemplatedEmail(user.email, 'verification', {
             username: user.username,
             email: user.email,
             verificationLink
         });
-        
+
         res.json({ message: 'Email de verificación enviado' });
     } catch (err) {
         logger.error('Error', { error: err.message, stack: err.stack });
@@ -1967,17 +2125,17 @@ app.post('/api/admin/users/:id/send-verification', requireAdmin, asyncHandler(as
 // Admin: Send password reset email to user
 app.post('/api/admin/users/:id/send-reset', requireAdmin, asyncHandler(async (req, res) => {
     const { id } = req.params;
-    
+
     try {
         const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-        
+
         // Generate reset token (store hash, send plain token)
         const { token: resetToken, hash: resetTokenHash } = generateSecureToken();
         const resetTokenExpires = Date.now() + (60 * 60 * 1000); // 1 hour
-        
+
         db.prepare('UPDATE users SET resetToken = ?, resetTokenExpires = ? WHERE id = ?').run(resetTokenHash, resetTokenExpires, id);
-        
+
         // Send password reset email
         const resetLink = `${PUBLIC_ORIGIN}/reset-password?token=${resetToken}`;
         await sendTemplatedEmail(user.email, 'passwordReset', {
@@ -1985,7 +2143,7 @@ app.post('/api/admin/users/:id/send-reset', requireAdmin, asyncHandler(async (re
             email: user.email,
             resetLink
         });
-        
+
         res.json({ message: 'Email de reseteo de contraseña enviado' });
     } catch (err) {
         logger.error('Error', { error: err.message, stack: err.stack });
@@ -1998,14 +2156,14 @@ app.get('/api/admin/files', requireAdmin, (req, res) => {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const offset = (page - 1) * limit;
-    
+
     // Get total count
     const { total } = db.prepare('SELECT COUNT(*) as total FROM files').get();
-    
+
     // Get paginated files
     const files = db.prepare('SELECT * FROM files ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(limit, offset);
-    
-    res.json({ 
+
+    res.json({
         files,
         pagination: {
             page,
@@ -2036,8 +2194,27 @@ app.post('/api/admin/rate-limits/reset', requireAdmin, (req, res) => {
 
 app.post('/api/admin/settings', requireAdmin, (req, res) => {
     const settings = req.body;
+
+    // Allowlist of valid settings keys (prevents arbitrary key injection)
+    const ALLOWED_SETTINGS_KEYS = new Set([
+        'logoLight', 'logoDark', 'logoLightEmail', 'logoDarkEmail',
+        'favicon', 'dropzoneIcon', 'footerText',
+        'smtpHost', 'smtpPort', 'smtpSecure', 'smtpUser', 'smtpPass', 'smtpFrom',
+        'maxFileSize', 'maxTotalSize', 'guestUploadLimit', 'guestMaxFileSize', 'chunkSize',
+        'maxConcurrentUploads', 'chunkRateLimit', 'adaptiveChunkSizing',
+        'smallFileThreshold', 'mediumFileThreshold', 'smallFileChunkSize',
+        'mediumFileChunkSize', 'largeFileChunkSize', 'emailTemplates',
+        'defaultRetentionDays'
+    ]);
+
+    // Reject unknown keys
+    const unknownKeys = Object.keys(settings).filter(k => !ALLOWED_SETTINGS_KEYS.has(k));
+    if (unknownKeys.length > 0) {
+        return res.status(400).json({ error: `Claves de configuración no permitidas: ${unknownKeys.join(', ')}` });
+    }
+
     const stmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
-    
+
     // Keys that should be encrypted
     const sensitiveKeys = ['smtpPass'];
 
@@ -2051,6 +2228,8 @@ app.post('/api/admin/settings', requireAdmin, (req, res) => {
 
     try {
         insertMany(settings);
+        // Invalidate cache so new values take effect immediately
+        invalidateSettingsCache(Object.keys(settings));
         res.json({ message: 'Configuración actualizada' });
     } catch (err) {
         logger.error('Error al actualizar configuración', { error: err.message });
@@ -2106,32 +2285,32 @@ app.post('/api/admin/branding/upload', requireAdmin, validateBrandingType, brand
     }
 
     const timestamp = Date.now();
-    
+
     // If it's an SVG logo, queue a background job to create PNG version for emails
     if (req.file.mimetype === 'image/svg+xml' && (type === 'logoLight' || type === 'logoDark')) {
         const svgPath = path.join(BRANDING_DIR, req.file.filename);
         const pngFilename = `${type}-email.png`;
         const pngPath = path.join(BRANDING_DIR, pngFilename);
-        
+
         // Queue the conversion job (non-blocking)
         enqueueBrandingConversion(svgPath, pngPath, {
             format: 'png',
             height: 80, // Height for emails, maintains aspect ratio
         });
-        
+
         // Pre-register the PNG URL (will be available after job completes)
         const pngRelativePath = `/branding/${pngFilename}?t=${timestamp}`;
         const pngUrl = PUBLIC_ORIGIN ? `${PUBLIC_ORIGIN}${pngRelativePath}` : pngRelativePath;
         const emailLogoKey = type === 'logoLight' ? 'logoLightEmail' : 'logoDarkEmail';
         db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(emailLogoKey, pngUrl);
-        
+
         logger.info(`Queued PNG conversion for emails: ${pngFilename}`);
     }
 
     // Build the URL - always use relative path for branding assets
     // They will be served through the same origin
     const relativePath = `/branding/${req.file.filename}?t=${timestamp}`;
-    
+
     const stmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
     stmt.run(type, relativePath);
 
@@ -2172,7 +2351,7 @@ app.post('/api/admin/smtp/test', requireAdmin, async (req, res) => {
 
     try {
         const config = getSmtpConfig();
-        
+
         if (!config.smtpHost || !config.smtpUser || !config.smtpPass) {
             return res.status(400).json({ error: 'Configuración SMTP incompleta. Guarda la configuración primero.' });
         }
@@ -2218,7 +2397,7 @@ app.get('/api/settings/public', (req, res) => {
 // Upload Limits (public)
 app.get('/api/settings/limits', (req, res) => {
     const keys = [
-        'maxFileSize', 'maxTotalSize', 'guestUploadLimit', 'guestMaxFileSize', 
+        'maxFileSize', 'maxTotalSize', 'guestUploadLimit', 'guestMaxFileSize',
         'chunkSize', 'maxConcurrentUploads',
         // Adaptive chunk sizing settings
         'adaptiveChunkSizing', 'smallFileThreshold', 'mediumFileThreshold',
@@ -2253,7 +2432,7 @@ app.get('/api/settings/limits', (req, res) => {
             settingsMap[s.key] = parseInt(s.value) || settingsMap[s.key];
         }
     });
-    
+
     // Calculate effective max file size based on user type
     const isLoggedIn = !!req.session.userId;
     settingsMap.effectiveMaxFileSize = isLoggedIn ? settingsMap.maxFileSize : settingsMap.guestMaxFileSize;
@@ -2261,41 +2440,41 @@ app.get('/api/settings/limits', (req, res) => {
     // Tamaño máximo de chunk permitido por backend (en MB, basado en ajustes + colchón)
     const maxChunkSizeBytes = getMaxChunkSizeFromSettingsSync();
     settingsMap.maxChunkSize = Math.round(maxChunkSizeBytes / (1024 * 1024));
-    
+
     // Add guest remaining if not logged in
     if (!isLoggedIn) {
         const fingerprint = generateFingerprint(req);
         const ipFingerprint = getIpFingerprint(req);
         const guestLimitBytes = settingsMap.guestUploadLimit * 1024 * 1024;
-        
+
         const check1 = canGuestUpload(fingerprint, 0, guestLimitBytes);
         const check2 = canGuestUpload(ipFingerprint, 0, guestLimitBytes);
-        
+
         settingsMap.guestRemaining = Math.min(check1.remaining, check2.remaining);
     }
-    
+
     res.json(settingsMap);
 });
 
 // Health check endpoint (for Docker/PaaS health probes)
 app.get('/api/health', (req, res) => {
-    res.json({ 
-        status: 'ok', 
+    res.json({
+        status: 'ok',
         timestamp: Date.now(),
         uptime: process.uptime()
     });
 });
 
-// Session debug endpoint (only in development or with DEBUG_SESSION env)
-app.get('/api/health/session', (req, res) => {
+// Session debug endpoint (only in development or with DEBUG_SESSION env, admin-only)
+app.get('/api/health/session', requireAdmin, (req, res) => {
     if (process.env.NODE_ENV === 'production' && !process.env.DEBUG_SESSION) {
         return res.status(404).json({ error: 'Not found' });
     }
-    
+
     const cookieName = process.env.SESSION_COOKIE_NAME || 'sendu.sid';
     const sessionCookie = req.cookies?.[cookieName];
     const trustProxyValue = app.get('trust proxy');
-    
+
     res.json({
         config: {
             cookieName,
@@ -2318,8 +2497,8 @@ app.get('/api/health/session', (req, res) => {
             origin: req.get('origin')
         },
         cookies: Object.keys(req.cookies || {}),
-        fix: req.protocol !== 'https' && req.get('x-forwarded-proto') === 'https' 
-            ? 'Trust proxy is not working correctly. Try setting TRUST_PROXY=true' 
+        fix: req.protocol !== 'https' && req.get('x-forwarded-proto') === 'https'
+            ? 'Trust proxy is not working correctly. Try setting TRUST_PROXY=true'
             : null
     });
 });
@@ -2329,21 +2508,21 @@ app.get('/api/health/ready', async (req, res) => {
     let dbOk = false;
     let storageOk = false;
     let dataOk = false;
-    
+
     try {
         db.prepare('SELECT 1').get();
         dbOk = true;
-    } catch {}
+    } catch { }
 
     try {
         await fsPromises.access(UPLOAD_DIR, fs.constants.W_OK);
         storageOk = true;
-    } catch {}
+    } catch { }
 
     try {
         await fsPromises.access(dataDir, fs.constants.W_OK);
         dataOk = true;
-    } catch {}
+    } catch { }
 
     const ready = dbOk && storageOk && dataOk;
     res.status(ready ? 200 : 503).json({
@@ -2363,26 +2542,26 @@ if (process.env.NODE_ENV === 'production') {
         if (req.path.startsWith('/api/')) {
             return next();
         }
-        
+
         // Skip branding and other static assets
         if (req.path.startsWith('/branding/') || req.path.match(/\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$/)) {
             return next();
         }
-        
+
         // Serve index.html for SPA routes
         const staticPath = path.join(rootDir, 'frontend/dist');
         const publicPath = path.join(rootDir, 'public');
-        
+
         let indexPath = path.join(staticPath, 'index.html');
         if (!fs.existsSync(indexPath)) {
             indexPath = path.join(publicPath, 'index.html');
         }
-        
+
         if (fs.existsSync(indexPath)) {
             res.setHeader('Content-Type', 'text/html; charset=utf-8');
             return res.sendFile(indexPath);
         }
-        
+
         next();
     });
 }
@@ -2395,8 +2574,8 @@ app.use(globalErrorHandler);
 
 // Database Initialization (Schema)
 const initDb = () => {
-        // Run versioned migrations (idempotent)
-        runMigrations(db);
+    // Run versioned migrations (idempotent)
+    runMigrations(db);
 
     // Initialize default settings if not present
     const concurrencySetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('maxConcurrentUploads');
@@ -2410,7 +2589,7 @@ const initDb = () => {
     }
 
     logger.info('Database initialized');
-    
+
     // Save database after initialization
     saveDatabase();
 };
@@ -2418,24 +2597,24 @@ const initDb = () => {
 // Automatic cleanup job - runs every hour with distributed locking
 const cleanupExpiredFiles = async () => {
     const now = Date.now();
-    
+
     // Find expired files
     const expiredFiles = db.prepare('SELECT * FROM files WHERE expiresAt IS NOT NULL AND expiresAt < ?').all(now);
-    
+
     // Find files with max downloads reached
     const maxDownloadFiles = db.prepare('SELECT * FROM files WHERE maxDownloads IS NOT NULL AND downloadCount >= maxDownloads').all();
-    
+
     const filesToDelete = [...expiredFiles, ...maxDownloadFiles];
-    
+
     // Remove duplicates
     const uniqueFiles = filesToDelete.filter((file, index, self) =>
         index === self.findIndex((t) => t.id === file.id)
     );
-    
+
     if (uniqueFiles.length === 0) return;
-    
+
     logger.info(`Cleanup: Found ${uniqueFiles.length} expired files to delete`);
-    
+
     for (const file of uniqueFiles) {
         try {
             try {
@@ -2503,27 +2682,27 @@ const cleanupOrphanedChunks = async (maxAgeMs = 24 * 60 * 60 * 1000) => {
     const now = Date.now();
     let deletedCount = 0;
     let freedBytes = 0;
-    
+
     // Ensure chunks directory exists
     if (!fs.existsSync(CHUNKS_DIR)) {
         fs.mkdirSync(CHUNKS_DIR, { recursive: true });
         return { deletedCount: 0, freedBytes: 0 };
     }
-    
+
     try {
         const chunkDirs = await fsPromises.readdir(CHUNKS_DIR);
-        
+
         for (const dir of chunkDirs) {
             const chunkPath = path.join(CHUNKS_DIR, dir);
-            
+
             try {
                 const stat = await fsPromises.stat(chunkPath);
                 if (!stat.isDirectory()) continue;
-                
+
                 // Find the most recent modification time among all files in the folder
                 // This ensures we don't delete active uploads (slow connections)
                 let lastActivity = stat.mtimeMs;
-                
+
                 const files = await fsPromises.readdir(chunkPath);
                 for (const file of files) {
                     try {
@@ -2531,9 +2710,9 @@ const cleanupOrphanedChunks = async (maxAgeMs = 24 * 60 * 60 * 1000) => {
                         if (fileStat.mtimeMs > lastActivity) {
                             lastActivity = fileStat.mtimeMs;
                         }
-                    } catch {}
+                    } catch { }
                 }
-                
+
                 // Only delete if NO activity for maxAge (safe for slow uploads)
                 const timeSinceLastActivity = now - lastActivity;
                 if (timeSinceLastActivity > maxAgeMs) {
@@ -2542,9 +2721,9 @@ const cleanupOrphanedChunks = async (maxAgeMs = 24 * 60 * 60 * 1000) => {
                         try {
                             const fileStat = await fsPromises.stat(path.join(chunkPath, file));
                             freedBytes += fileStat.size;
-                        } catch {}
+                        } catch { }
                     }
-                    
+
                     await fsPromises.rm(chunkPath, { recursive: true, force: true });
                     deletedCount++;
                     logger.info(`Cleanup: Deleted orphaned chunk folder ${dir} (inactive for ${Math.round(timeSinceLastActivity / 60000)} minutes)`);
@@ -2556,35 +2735,35 @@ const cleanupOrphanedChunks = async (maxAgeMs = 24 * 60 * 60 * 1000) => {
     } catch (err) {
         logger.error('Error reading chunks directory', { error: err.message });
     }
-    
+
     return { deletedCount, freedBytes };
 };
 
 // Admin endpoint to manually trigger orphaned chunks cleanup
 app.post('/api/admin/cleanup-chunks', requireAdmin, asyncHandler(async (req, res) => {
     const { maxAgeHours = 1, useQueue = false } = req.body; // Default: 1 hour old chunks
-    
+
     if (useQueue) {
         // Queue the cleanup job for background processing
-        const jobId = enqueueCleanup('chunks', { 
-            maxAgeHours, 
-            chunksDir: CHUNKS_DIR 
+        const jobId = enqueueCleanup('chunks', {
+            maxAgeHours,
+            chunksDir: CHUNKS_DIR
         });
-        return res.json({ 
+        return res.json({
             message: 'Limpieza encolada para procesamiento en segundo plano',
-            jobId 
+            jobId
         });
     }
-    
+
     // Immediate cleanup (legacy behavior)
     const maxAgeMs = Math.max(1, Math.min(720, maxAgeHours)) * 60 * 60 * 1000; // 1 hour to 30 days
-    
+
     const result = await cleanupOrphanedChunks(maxAgeMs);
-    
+
     const freedMB = (result.freedBytes / (1024 * 1024)).toFixed(2);
     logger.info(`Manual cleanup: Deleted ${result.deletedCount} orphaned chunk folders, freed ${freedMB}MB`);
-    
-    res.json({ 
+
+    res.json({
         message: `Se eliminaron ${result.deletedCount} carpetas de chunks huérfanos`,
         deletedCount: result.deletedCount,
         freedBytes: result.freedBytes,
@@ -2603,7 +2782,7 @@ app.get('/api/admin/metrics', requireAdmin, asyncHandler(async (req, res) => {
     let disk = null;
     try {
         disk = await checkDiskSpace(UPLOAD_DIR);
-    } catch {}
+    } catch { }
     const queue = getQueueStats();
     res.json({
         metrics: metrics.getSnapshot(),
@@ -2616,20 +2795,20 @@ app.get('/api/admin/metrics', requireAdmin, asyncHandler(async (req, res) => {
 app.post('/api/admin/jobs/cleanup', requireAdmin, asyncHandler(async (req, res) => {
     const { type = 'all' } = req.body;
     const jobs = [];
-    
+
     if (type === 'files' || type === 'all') {
         const jobId = enqueueCleanup('files', { uploadDir: UPLOAD_DIR });
         jobs.push({ type: 'files', jobId });
     }
-    
+
     if (type === 'chunks' || type === 'all') {
         const jobId = enqueueCleanup('chunks', { chunksDir: CHUNKS_DIR });
         jobs.push({ type: 'chunks', jobId });
     }
-    
-    res.json({ 
+
+    res.json({
         message: `${jobs.length} trabajo(s) de limpieza encolado(s)`,
-        jobs 
+        jobs
     });
 }));
 
@@ -2717,25 +2896,25 @@ const startServer = async (options = {}) => {
             const stats = fs.statSync(targetDbPath);
             logger.info(`Database size: ${(stats.size / 1024).toFixed(2)} KB`);
         }
-        
+
         // Initialize database first
         db = await initDatabase(targetDbPath);
-        
+
         // Initialize database schema
         initDb();
 
         // Seed default branding settings if missing
         ensureDefaultBrandingSettings();
-        
+
         // Initialize persistent stores (CSRF, guest tracking, download tokens, sessions)
         initPersistentStores(db);
         enableCsrfPersistence();
         enableGuestPersistence();
-        
+
         // Setup session middleware now that database is ready
         setupSessionMiddleware();
         logger.info('Persistent stores initialized (sessions, CSRF, guest tracking, download tokens)');
-        
+
         if (enableJobs) {
             // Initialize job queue system for background tasks
             initJobQueue(db, {
@@ -2746,12 +2925,12 @@ const startServer = async (options = {}) => {
             initJobHandlers(db, getSmtpConfig);
             logger.info('Job queue system initialized (emails, cleanup, branding conversion)');
         }
-        
+
         // Log some stats to verify data persistence
         const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get()?.count || 0;
         const settingsCount = db.prepare('SELECT COUNT(*) as count FROM settings').get()?.count || 0;
         logger.info(`Database loaded: ${userCount} users, ${settingsCount} settings`);
-        
+
         if (enableSchedulers) {
             // Run cleanup on startup and schedule next
             runCleanup();
@@ -2762,7 +2941,7 @@ const startServer = async (options = {}) => {
             monitorDiskSpace();
             setInterval(monitorDiskSpace, DISK_CHECK_INTERVAL);
         }
-        
+
         if (listen) {
             // Start Server
             const server = app.listen(PORT, () => {
@@ -2776,12 +2955,12 @@ const startServer = async (options = {}) => {
             });
 
             // Setup process-level error handlers for graceful shutdown
-            setupProcessErrorHandlers(server);
+            setupProcessErrorHandlers(server, { stopJobProcessor });
             return server;
         }
-        
+
         return null;
-        
+
     } catch (err) {
         logger.error('Failed to start server', { error: err.message });
         process.exit(1);

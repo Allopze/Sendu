@@ -19,7 +19,7 @@ Sendu carga variables desde .env (dotenv) en el backend y el frontend durante de
 | SESSION_COOKIE_SAMESITE | No | SameSite para cookie de sesión (lax, strict, none). Por defecto lax. |
 | SESSION_COOKIE_SECURE | No | Secure para cookie de sesión (true/false). Por defecto true en producción. **IMPORTANTE**: Si usas HTTP (no HTTPS), debes poner `false`, pero esto NO es recomendado en producción. |
 | TRUST_PROXY | No | Habilita trust proxy (por defecto 1 en producción). Necesario si hay un reverse proxy (nginx, Cloudflare, etc.) delante de la app. |
-| CSP_STRICT | No | true para CSP estricta. |
+| CSP_STRICT | No | `true` para activar Content Security Policy estricta. Elimina `'unsafe-inline'` de las directivas `script-src` y `style-src` en las cabeceras CSP. **Nota:** puede romper estilos inline de React; prueba en staging antes de activar en producción. Si usas Cloudflare Analytics, la directiva ya incluye `cloudflareinsights.com`. |
 
 ## Problema común: Sesión se pierde al refrescar
 

@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import apiClient from '../api/client';
-import { 
-    Loader2, Trash2, Users, FileText, Settings, Upload, X, Sun, Moon, Image, 
-    Mail, Send, HardDrive, FileCode, Shield, Key, Edit2, Check, CheckCircle, 
+import {
+    Loader2, Trash2, Users, FileText, Settings, Upload, X, Sun, Moon, Image,
+    Mail, Send, HardDrive, FileCode, Shield, Key, Edit2, Check, CheckCircle,
     XCircle, RefreshCw, LayoutDashboard, Layout, Code
 } from 'lucide-react';
 import Toast from '../components/ui/Toast';
@@ -22,7 +22,7 @@ const AdminPage = () => {
     const [stats, setStats] = useState(null);
     const [users, setUsers] = useState([]);
     const [files, setFiles] = useState([]);
-    const [settings, setSettings] = useState({ 
+    const [settings, setSettings] = useState({
         logoLight: '', logoDark: '', favicon: '', dropzoneIcon: '', footerText: '',
         smtpHost: '', smtpPort: '587', smtpSecure: 'false', smtpUser: '', smtpPass: '', smtpFrom: '',
         maxFileSize: '100', maxTotalSize: '500', guestUploadLimit: '5120', guestMaxFileSize: '100', chunkSize: '20',
@@ -41,6 +41,7 @@ const AdminPage = () => {
     const [deleteFileModal, setDeleteFileModal] = useState({ isOpen: false, fileId: null, fileName: '' });
     const [cleaningChunks, setCleaningChunks] = useState(false);
     const [resettingRateLimits, setResettingRateLimits] = useState(false);
+    const [resetRateLimitModal, setResetRateLimitModal] = useState(false);
     const [editingUser, setEditingUser] = useState(null);
     const [editForm, setEditForm] = useState({ email: '', username: '' });
     const [resetPasswordUser, setResetPasswordUser] = useState(null);
@@ -110,10 +111,10 @@ const AdminPage = () => {
                 mediumFileChunkSize: settings.mediumFileChunkSize,
                 largeFileChunkSize: settings.largeFileChunkSize
             };
-            
+
             await apiClient.updateAdminSettings(settingsToSave);
             setOriginalSettings({ ...settings });
-            
+
             // Update branding context
             const brandingKeys = ['logoLight', 'logoDark', 'favicon', 'footerText'];
             const brandingUpdate = {};
@@ -121,10 +122,10 @@ const AdminPage = () => {
                 if (settings[key] !== undefined) brandingUpdate[key] = settings[key];
             }
             if (Object.keys(brandingUpdate).length > 0) updateBrandingContext(brandingUpdate);
-            
+
             setToast({ message: 'Configuración guardada', type: 'success' });
-        } catch { 
-            setToast({ message: 'Error al guardar', type: 'error' }); 
+        } catch {
+            setToast({ message: 'Error al guardar', type: 'error' });
         }
         finally { setSaving(false); }
     };
@@ -132,10 +133,10 @@ const AdminPage = () => {
     const handleToggleRole = async (userId) => {
         try {
             const res = await apiClient.toggleUserRole(userId);
-            if (res.ok) { 
-                const data = await res.json(); 
-                setUsers(prev => prev.map(u => u.id === userId ? { ...u, role: data.role } : u)); 
-                setToast({ message: `Rol cambiado a ${data.role}`, type: 'success' }); 
+            if (res.ok) {
+                const data = await res.json();
+                setUsers(prev => prev.map(u => u.id === userId ? { ...u, role: data.role } : u));
+                setToast({ message: `Rol cambiado a ${data.role}`, type: 'success' });
             }
             else { const err = await res.json(); setToast({ message: err.error, type: 'error' }); }
         } catch { setToast({ message: 'Error al cambiar rol', type: 'error' }); }
@@ -144,10 +145,10 @@ const AdminPage = () => {
     const handleToggleVerified = async (userId) => {
         try {
             const res = await apiClient.toggleUserVerified(userId);
-            if (res.ok) { 
-                const data = await res.json(); 
-                setUsers(prev => prev.map(u => u.id === userId ? { ...u, isVerified: data.isVerified } : u)); 
-                setToast({ message: data.isVerified ? 'Usuario verificado' : 'Verificación removida', type: 'success' }); 
+            if (res.ok) {
+                const data = await res.json();
+                setUsers(prev => prev.map(u => u.id === userId ? { ...u, isVerified: data.isVerified } : u));
+                setToast({ message: data.isVerified ? 'Usuario verificado' : 'Verificación removida', type: 'success' });
             }
             else { const err = await res.json(); setToast({ message: err.error, type: 'error' }); }
         } catch { setToast({ message: 'Error al cambiar verificación', type: 'error' }); }
@@ -156,68 +157,68 @@ const AdminPage = () => {
     const handleDeleteUser = async (userId) => {
         try {
             const res = await apiClient.deleteUser(userId);
-            if (res.ok) { 
-                setUsers(prev => prev.filter(u => u.id !== userId)); 
-                setToast({ message: 'Usuario eliminado', type: 'success' }); 
-                fetchData(); 
+            if (res.ok) {
+                setUsers(prev => prev.filter(u => u.id !== userId));
+                setToast({ message: 'Usuario eliminado', type: 'success' });
+                fetchData();
             }
             else { const err = await res.json(); setToast({ message: err.error, type: 'error' }); }
         } catch { setToast({ message: 'Error al eliminar usuario', type: 'error' }); }
         setDeleteUserModal({ isOpen: false, userId: null, username: '' });
     };
 
-    const handleStartEdit = (user) => { 
+    const handleStartEdit = (user) => {
         // Toggle: si ya está editando este usuario, cerrar
         if (editingUser === user.id) {
             setEditingUser(null);
             return;
         }
-        setEditingUser(user.id); 
-        setEditForm({ email: user.email, username: user.username }); 
+        setEditingUser(user.id);
+        setEditForm({ email: user.email, username: user.username });
     };
 
     const handleSaveEdit = async (userId) => {
         try {
             const res = await apiClient.updateUser(userId, editForm);
-            if (res.ok) { 
-                setUsers(prev => prev.map(u => u.id === userId ? { ...u, ...editForm } : u)); 
-                setToast({ message: 'Usuario actualizado', type: 'success' }); 
-                setEditingUser(null); 
+            if (res.ok) {
+                setUsers(prev => prev.map(u => u.id === userId ? { ...u, ...editForm } : u));
+                setToast({ message: 'Usuario actualizado', type: 'success' });
+                setEditingUser(null);
             }
             else { const err = await res.json(); setToast({ message: err.error, type: 'error' }); }
         } catch { setToast({ message: 'Error al actualizar usuario', type: 'error' }); }
     };
 
     const handleResetPassword = async (userId) => {
-        if (!newPassword || newPassword.length < 6) { 
-            setToast({ message: 'La contraseña debe tener al menos 6 caracteres', type: 'error' }); 
-            return; 
+        if (!newPassword || newPassword.length < 6) {
+            setToast({ message: 'La contraseña debe tener al menos 6 caracteres', type: 'error' });
+            return;
         }
         try {
             const res = await apiClient.resetUserPassword(userId, newPassword);
-            if (res.ok) { 
-                setToast({ message: 'Contraseña actualizada', type: 'success' }); 
-                setResetPasswordUser(null); 
-                setNewPassword(''); 
+            if (res.ok) {
+                setToast({ message: 'Contraseña actualizada', type: 'success' });
+                setResetPasswordUser(null);
+                setNewPassword('');
             }
             else { const err = await res.json(); setToast({ message: err.error, type: 'error' }); }
         } catch { setToast({ message: 'Error al cambiar contraseña', type: 'error' }); }
     };
 
     const handleSendVerificationEmail = async (userId) => {
-        try { 
-            const res = await apiClient.sendUserVerification(userId); 
-            if (res.ok) setToast({ message: 'Email de verificación enviado', type: 'success' }); 
-            else { const err = await res.json(); setToast({ message: err.error, type: 'error' }); } 
+        try {
+            const res = await apiClient.sendUserVerification(userId);
+            if (res.ok) setToast({ message: 'Email de verificación enviado', type: 'success' });
+            else { const err = await res.json(); setToast({ message: err.error, type: 'error' }); }
         }
         catch { setToast({ message: 'Error al enviar email', type: 'error' }); }
     };
 
     const handleSendPasswordResetEmail = async (userId) => {
-        try { 
-            const res = await apiClient.sendUserPasswordReset(userId); 
-            if (res.ok) setToast({ message: 'Email de reseteo enviado', type: 'success' }); 
-            else { const err = await res.json(); setToast({ message: err.error, type: 'error' }); } 
+        try {
+            const res = await apiClient.sendUserPasswordReset(userId);
+            if (res.ok) setToast({ message: 'Email de reseteo enviado', type: 'success' });
+            else { const err = await res.json(); setToast({ message: err.error, type: 'error' }); }
         }
         catch { setToast({ message: 'Error al enviar email', type: 'error' }); }
     };
@@ -227,12 +228,12 @@ const AdminPage = () => {
         setUploading(prev => ({ ...prev, [type]: true }));
         try {
             const res = await apiClient.uploadBranding(type, file);
-            if (res.ok) { 
-                const data = await res.json(); 
-                setSettings(prev => ({ ...prev, [type]: data.url })); 
+            if (res.ok) {
+                const data = await res.json();
+                setSettings(prev => ({ ...prev, [type]: data.url }));
                 setOriginalSettings(prev => ({ ...prev, [type]: data.url }));
-                updateBrandingContext({ [type]: data.url }); 
-                setToast({ message: 'Archivo subido', type: 'success' }); 
+                updateBrandingContext({ [type]: data.url });
+                setToast({ message: 'Archivo subido', type: 'success' });
             }
             else { const err = await res.json(); setToast({ message: err.error || 'Error', type: 'error' }); }
         } catch { setToast({ message: 'Error al subir', type: 'error' }); }
@@ -240,14 +241,14 @@ const AdminPage = () => {
     };
 
     const handleDeleteBranding = async (type) => {
-        try { 
-            const res = await apiClient.deleteBranding(type); 
-            if (res.ok) { 
-                setSettings(prev => ({ ...prev, [type]: '' })); 
+        try {
+            const res = await apiClient.deleteBranding(type);
+            if (res.ok) {
+                setSettings(prev => ({ ...prev, [type]: '' }));
                 setOriginalSettings(prev => ({ ...prev, [type]: '' }));
-                updateBrandingContext({ [type]: '' }); 
-                setToast({ message: 'Eliminado', type: 'success' }); 
-            } 
+                updateBrandingContext({ [type]: '' });
+                setToast({ message: 'Eliminado', type: 'success' });
+            }
         }
         catch { setToast({ message: 'Error', type: 'error' }); }
     };
@@ -255,20 +256,20 @@ const AdminPage = () => {
     const handleTestEmail = async () => {
         if (!testEmail) { setToast({ message: 'Introduce un email', type: 'error' }); return; }
         setTestingEmail(true);
-        try { 
-            const res = await apiClient.testEmail(testEmail); 
-            const data = await res.json(); 
-            setToast({ message: res.ok ? 'Email enviado' : (data.error || 'Error'), type: res.ok ? 'success' : 'error' }); 
+        try {
+            const res = await apiClient.testEmail(testEmail);
+            const data = await res.json();
+            setToast({ message: res.ok ? 'Email enviado' : (data.error || 'Error'), type: res.ok ? 'success' : 'error' });
         }
         catch { setToast({ message: 'Error', type: 'error' }); }
         finally { setTestingEmail(false); }
     };
 
     const handleDeleteFile = async (id) => {
-        try { 
-            await apiClient.deleteFile(id); 
-            fetchData(); 
-            setToast({ message: 'Archivo eliminado', type: 'success' }); 
+        try {
+            await apiClient.deleteFile(id);
+            fetchData();
+            setToast({ message: 'Archivo eliminado', type: 'success' });
         }
         catch { setToast({ message: 'Error', type: 'error' }); }
         setDeleteFileModal({ isOpen: false, fileId: null, fileName: '' });
@@ -276,24 +277,26 @@ const AdminPage = () => {
 
     const handleCleanupChunks = async () => {
         setCleaningChunks(true);
-        try { 
-            const res = await apiClient.cleanupChunks(1); 
-            if (res.ok) { 
-                const data = await res.json(); 
-                setToast({ message: `Limpieza: ${data.deletedCount} eliminados (${data.freedMB}MB)`, type: 'success' }); 
-                fetchData(); 
-            } else { 
-                const err = await res.json(); 
-                setToast({ message: err.error, type: 'error' }); 
-            } 
+        try {
+            const res = await apiClient.cleanupChunks(1);
+            if (res.ok) {
+                const data = await res.json();
+                setToast({ message: `Limpieza: ${data.deletedCount} eliminados (${data.freedMB}MB)`, type: 'success' });
+                fetchData();
+            } else {
+                const err = await res.json();
+                setToast({ message: err.error, type: 'error' });
+            }
         }
         catch { setToast({ message: 'Error', type: 'error' }); }
         finally { setCleaningChunks(false); }
     };
 
-    const handleResetRateLimits = async () => {
-        const confirmed = window.confirm('¿Reiniciar todos los rate limits? Esto afecta a todo el sistema.');
-        if (!confirmed) return;
+    const handleResetRateLimits = () => {
+        setResetRateLimitModal(true);
+    };
+
+    const confirmResetRateLimits = async () => {
         setResettingRateLimits(true);
         try {
             const res = await apiClient.resetRateLimits('all');
@@ -308,6 +311,7 @@ const AdminPage = () => {
             setToast({ message: 'Error al reiniciar rate limits', type: 'error' });
         } finally {
             setResettingRateLimits(false);
+            setResetRateLimitModal(false);
         }
     };
 
@@ -317,8 +321,8 @@ const AdminPage = () => {
             setSettings(prev => ({ ...prev, ...newSettings }));
             setOriginalSettings(prev => ({ ...prev, ...newSettings }));
             setToast({ message: 'Plantillas guardadas', type: 'success' });
-        } catch { 
-            setToast({ message: 'Error al guardar plantillas', type: 'error' }); 
+        } catch {
+            setToast({ message: 'Error al guardar plantillas', type: 'error' });
         }
     };
 
@@ -348,51 +352,51 @@ const AdminPage = () => {
     const LogoUploader = ({ title, description, type, value, bgClass = '' }) => {
         const [imgError, setImgError] = useState(false);
         const [lastValue, setLastValue] = useState(value);
-        
+
         // Reset error when value changes
         if (value !== lastValue) {
             setLastValue(value);
             setImgError(false);
         }
-        
+
         return (
-        <div className={`p-4 rounded-xl border border-dashed flex items-center justify-between group transition-colors ${isDark ? 'border-zinc-700 hover:border-zinc-500 bg-zinc-900/30' : 'border-zinc-300 hover:border-zinc-400 bg-zinc-50'}`}>
-            <div className="flex items-center gap-4">
-                <div className={`w-12 h-12 rounded-lg flex items-center justify-center overflow-hidden ${bgClass || (isDark ? 'bg-zinc-800' : 'bg-zinc-200')}`}>
-                    {value && !imgError ? (
-                        <img 
-                            src={value} 
-                            alt={title} 
-                            className="w-full h-full object-contain p-1" 
-                            onError={() => setImgError(true)}
-                        />
-                    ) : (
-                        <Image size={24} className="text-zinc-500" />
+            <div className={`p-4 rounded-xl border border-dashed flex items-center justify-between group transition-colors ${isDark ? 'border-zinc-700 hover:border-zinc-500 bg-zinc-900/30' : 'border-zinc-300 hover:border-zinc-400 bg-zinc-50'}`}>
+                <div className="flex items-center gap-4">
+                    <div className={`w-12 h-12 rounded-lg flex items-center justify-center overflow-hidden ${bgClass || (isDark ? 'bg-zinc-800' : 'bg-zinc-200')}`}>
+                        {value && !imgError ? (
+                            <img
+                                src={value}
+                                alt={title}
+                                className="w-full h-full object-contain p-1"
+                                onError={() => setImgError(true)}
+                            />
+                        ) : (
+                            <Image size={24} className="text-zinc-500" />
+                        )}
+                    </div>
+                    <div>
+                        <p className={`font-medium ${isDark ? 'text-white' : 'text-zinc-900'}`}>{title}</p>
+                        <p className={`text-sm ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>{description}</p>
+                    </div>
+                </div>
+                <div className="flex items-center gap-2">
+                    {value && (
+                        <button
+                            onClick={() => handleDeleteBranding(type)}
+                            className={`p-2 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity ${isDark ? 'text-red-400 hover:bg-red-500/10' : 'text-red-500 hover:bg-red-50'}`}
+                        >
+                            <Trash2 size={16} />
+                        </button>
                     )}
-                </div>
-                <div>
-                    <p className={`font-medium ${isDark ? 'text-white' : 'text-zinc-900'}`}>{title}</p>
-                    <p className={`text-sm ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>{description}</p>
-                </div>
-            </div>
-            <div className="flex items-center gap-2">
-                {value && (
-                    <button 
-                        onClick={() => handleDeleteBranding(type)} 
-                        className={`p-2 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity ${isDark ? 'text-red-400 hover:bg-red-500/10' : 'text-red-500 hover:bg-red-50'}`}
+                    <button
+                        onClick={() => handleUploaderClick(type)}
+                        disabled={uploading[type]}
+                        className={`px-4 py-2 text-sm font-medium rounded-xl transition-colors ${isDark ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700' : 'bg-white hover:bg-zinc-50 text-zinc-700 border border-zinc-300'} disabled:opacity-50`}
                     >
-                        <Trash2 size={16} />
+                        {uploading[type] ? <Loader2 size={14} className="animate-spin" /> : 'Subir'}
                     </button>
-                )}
-                <button 
-                    onClick={() => handleUploaderClick(type)}
-                    disabled={uploading[type]}
-                    className={`px-4 py-2 text-sm font-medium rounded-xl transition-colors ${isDark ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700' : 'bg-white hover:bg-zinc-50 text-zinc-700 border border-zinc-300'} disabled:opacity-50`}
-                >
-                    {uploading[type] ? <Loader2 size={14} className="animate-spin" /> : 'Subir'}
-                </button>
+                </div>
             </div>
-        </div>
         );
     };
 
@@ -407,7 +411,7 @@ const AdminPage = () => {
     // User List Item Component
     const UserListItem = ({ user }) => {
         const isAdmin = user.role === 'admin';
-        
+
         return (
             <div className={`flex items-center justify-between p-3 rounded-lg border ${isDark ? 'border-zinc-800 bg-zinc-900/50' : 'border-zinc-200 bg-white'}`}>
                 <div className="flex items-center gap-3">
@@ -421,8 +425,8 @@ const AdminPage = () => {
                         </p>
                     </div>
                 </div>
-                <button 
-                    onClick={() => handleStartEdit(user)} 
+                <button
+                    onClick={() => handleStartEdit(user)}
                     className={`p-2 rounded-lg ${isDark ? 'text-zinc-400 hover:text-white hover:bg-white/5' : 'text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100'}`}
                 >
                     <Settings size={14} />
@@ -440,7 +444,7 @@ const AdminPage = () => {
                 <h1 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-zinc-900'}`}>
                     Panel de Control
                 </h1>
-                <button 
+                <button
                     onClick={handleDiscard}
                     className={`p-2 rounded-lg transition-colors ${isDark ? 'text-zinc-400 hover:text-white hover:bg-white/5' : 'text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100'}`}
                 >
@@ -456,22 +460,22 @@ const AdminPage = () => {
                         <p className={`text-sm mb-4 ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>
                             Usuario: {users.find(u => u.id === resetPasswordUser)?.username}
                         </p>
-                        <input 
-                            type="password" 
-                            placeholder="Nueva contraseña (mín. 6 caracteres)" 
-                            value={newPassword} 
-                            onChange={(e) => setNewPassword(e.target.value)} 
-                            className={inputClass} 
+                        <input
+                            type="password"
+                            placeholder="Nueva contraseña (mín. 6 caracteres)"
+                            value={newPassword}
+                            onChange={(e) => setNewPassword(e.target.value)}
+                            className={inputClass}
                         />
                         <div className="flex justify-end gap-3 mt-4">
-                            <button 
-                                onClick={() => { setResetPasswordUser(null); setNewPassword(''); }} 
+                            <button
+                                onClick={() => { setResetPasswordUser(null); setNewPassword(''); }}
                                 className={`px-4 py-2 rounded-xl ${isDark ? 'text-zinc-400 hover:text-white' : 'text-zinc-600 hover:text-zinc-900'}`}
                             >
                                 Cancelar
                             </button>
-                            <button 
-                                onClick={() => handleResetPassword(resetPasswordUser)} 
+                            <button
+                                onClick={() => handleResetPassword(resetPasswordUser)}
                                 className="px-4 py-2 bg-red-600 text-white rounded-xl hover:bg-red-700"
                             >
                                 Guardar
@@ -489,15 +493,15 @@ const AdminPage = () => {
                             const Icon = tab.icon;
                             const isActive = activeTab === tab.id;
                             return (
-                                <button 
-                                    key={tab.id} 
+                                <button
+                                    key={tab.id}
                                     onClick={() => setActiveTab(tab.id)}
                                     className={`
                                         w-full flex items-center gap-3 px-4 py-3.5 rounded-xl text-[15px] font-medium transition-all text-left
-                                        ${isActive 
+                                        ${isActive
                                             ? isDark ? 'bg-red-600/10 text-red-500 border border-red-500/20' : 'bg-red-50 text-red-600 border border-red-200'
-                                            : isDark 
-                                                ? 'text-zinc-400 hover:bg-zinc-800 border border-transparent' 
+                                            : isDark
+                                                ? 'text-zinc-400 hover:bg-zinc-800 border border-transparent'
                                                 : 'text-zinc-500 hover:bg-zinc-100 border border-transparent'
                                         }
                                     `}
@@ -512,58 +516,58 @@ const AdminPage = () => {
 
                 {/* Content */}
                 <div className="flex-1 min-w-0 min-h-0 overflow-y-auto pl-4 pr-2">
-                    
+
                     {/* Branding / Marca y Diseño */}
                     {activeTab === 'branding' && (
                         <div className="animate-enter space-y-6">
                             <div className="space-y-4">
                                 <label className={`text-sm font-semibold ${isDark ? 'text-white' : 'text-zinc-900'}`}>Identidad de la Aplicación</label>
-                                
+
                                 <div className="grid gap-3">
                                     <label className={`text-xs font-semibold uppercase tracking-wider mt-2 ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>Logotipos</label>
-                                    <LogoUploader 
+                                    <LogoUploader
                                         title="Logo Tema Claro"
                                         description="Visible en fondo blanco (PNG/SVG)"
                                         type="logoLight"
                                         value={settings.logoLight}
                                         bgClass="bg-white"
                                     />
-                                    <LogoUploader 
+                                    <LogoUploader
                                         title="Logo Tema Oscuro"
                                         description="Visible en fondo oscuro (PNG/SVG)"
                                         type="logoDark"
                                         value={settings.logoDark}
                                         bgClass={isDark ? 'bg-zinc-800' : 'bg-zinc-700'}
                                     />
-                                    <LogoUploader 
+                                    <LogoUploader
                                         title="Favicon"
                                         description="Icono del navegador (ICO/PNG 32x32)"
                                         type="favicon"
                                         value={settings.favicon}
                                     />
-                                    <LogoUploader 
+                                    <LogoUploader
                                         title="Icono Dropzone"
                                         description="Icono en zona de arrastrar archivos (PNG/SVG)"
                                         type="dropzoneIcon"
                                         value={settings.dropzoneIcon}
                                     />
                                 </div>
-                                
+
                                 {/* Hidden file inputs */}
                                 <input ref={logoLightRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleUploadBranding('logoLight', e.target.files?.[0])} />
                                 <input ref={logoDarkRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleUploadBranding('logoDark', e.target.files?.[0])} />
                                 <input ref={faviconRef} type="file" accept="image/png,image/x-icon,image/svg+xml" className="hidden" onChange={(e) => handleUploadBranding('favicon', e.target.files?.[0])} />
                                 <input ref={dropzoneIconRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleUploadBranding('dropzoneIcon', e.target.files?.[0])} />
-                                
+
                                 {/* Footer Text */}
                                 <div className="mt-4">
                                     <label className={labelClass}>Texto del Footer</label>
-                                    <input 
-                                        type="text" 
-                                        placeholder="© 2025 Mi Empresa — Secure File Sharing" 
-                                        className={inputClass} 
-                                        value={settings.footerText || ''} 
-                                        onChange={(e) => setSettings({ ...settings, footerText: e.target.value })} 
+                                    <input
+                                        type="text"
+                                        placeholder="© 2025 Mi Empresa — Secure File Sharing"
+                                        className={inputClass}
+                                        value={settings.footerText || ''}
+                                        onChange={(e) => setSettings({ ...settings, footerText: e.target.value })}
                                     />
                                 </div>
                             </div>
@@ -588,7 +592,7 @@ const AdminPage = () => {
                                     <UserListItem key={user.id} user={user} />
                                 ))}
                             </div>
-                            
+
                             {users.length === 0 && (
                                 <div className={`text-center py-12 ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
                                     No hay usuarios registrados
@@ -604,20 +608,20 @@ const AdminPage = () => {
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
                                         <div>
                                             <label className={labelClass}>Nombre de usuario</label>
-                                            <input 
-                                                type="text" 
-                                                value={editForm.username} 
-                                                onChange={(e) => setEditForm({ ...editForm, username: e.target.value })} 
-                                                className={inputClass} 
+                                            <input
+                                                type="text"
+                                                value={editForm.username}
+                                                onChange={(e) => setEditForm({ ...editForm, username: e.target.value })}
+                                                className={inputClass}
                                             />
                                         </div>
                                         <div>
                                             <label className={labelClass}>Email</label>
-                                            <input 
-                                                type="email" 
-                                                value={editForm.email} 
-                                                onChange={(e) => setEditForm({ ...editForm, email: e.target.value })} 
-                                                className={inputClass} 
+                                            <input
+                                                type="email"
+                                                value={editForm.email}
+                                                onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
+                                                className={inputClass}
                                             />
                                         </div>
                                     </div>
@@ -666,9 +670,9 @@ const AdminPage = () => {
                                         </p>
                                     </div>
                                     <Tooltip text="Limpiar chunks huérfanos">
-                                        <button 
-                                            onClick={handleCleanupChunks} 
-                                            disabled={cleaningChunks} 
+                                        <button
+                                            onClick={handleCleanupChunks}
+                                            disabled={cleaningChunks}
                                             className={`flex items-center gap-2 px-4 py-2.5 text-sm rounded-xl font-medium transition-colors ${isDark ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30' : 'bg-amber-100 text-amber-700 hover:bg-amber-200'} disabled:opacity-50`}
                                         >
                                             {cleaningChunks ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
@@ -677,7 +681,7 @@ const AdminPage = () => {
                                     </Tooltip>
                                 </div>
                             </div>
-                            
+
                             {/* Files Table */}
                             <div className={`rounded-2xl overflow-hidden border ${isDark ? 'border-white/10' : 'border-zinc-200'}`}>
                                 <table className="w-full">
@@ -691,8 +695,8 @@ const AdminPage = () => {
                                     </thead>
                                     <tbody>
                                         {files.map((file, index) => (
-                                            <tr 
-                                                key={file.id} 
+                                            <tr
+                                                key={file.id}
                                                 className={`border-t transition-colors ${isDark ? 'border-white/5 hover:bg-white/5' : 'border-zinc-100 hover:bg-zinc-50'}`}
                                             >
                                                 <td className={`px-6 py-4 max-w-xs ${isDark ? 'text-white' : 'text-zinc-900'}`}>
@@ -714,8 +718,8 @@ const AdminPage = () => {
                                                     </span>
                                                 </td>
                                                 <td className="px-6 py-4">
-                                                    <button 
-                                                        onClick={() => setDeleteFileModal({ isOpen: true, fileId: file.id, fileName: file.originalName })} 
+                                                    <button
+                                                        onClick={() => setDeleteFileModal({ isOpen: true, fileId: file.id, fileName: file.originalName })}
                                                         className="p-2 rounded-lg text-red-500 hover:bg-red-500/10 transition-colors"
                                                     >
                                                         <Trash2 size={16} />
@@ -796,7 +800,7 @@ const AdminPage = () => {
                                     </div>
                                 </div>
                             </div>
-                            
+
                             {/* Chunk Settings */}
                             <div className={`mt-8 p-6 rounded-2xl ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
                                 <div className="flex items-center justify-between mb-6">
@@ -804,9 +808,9 @@ const AdminPage = () => {
                                         <label className={`font-semibold ${isDark ? 'text-white' : 'text-zinc-900'}`}>Chunk Adaptativo</label>
                                         <p className={`text-sm ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>Ajusta el tamaño de chunk según el archivo</p>
                                     </div>
-                                    <Toggle 
-                                        checked={settings.adaptiveChunkSizing === 'true'} 
-                                        onChange={(checked) => setSettings({ ...settings, adaptiveChunkSizing: checked ? 'true' : 'false' })} 
+                                    <Toggle
+                                        checked={settings.adaptiveChunkSizing === 'true'}
+                                        onChange={(checked) => setSettings({ ...settings, adaptiveChunkSizing: checked ? 'true' : 'false' })}
                                     />
                                 </div>
                                 {settings.adaptiveChunkSizing === 'true' ? (
@@ -912,23 +916,23 @@ const AdminPage = () => {
                                     </div>
                                 </div>
                             </div>
-                            
+
                             {/* Test Section */}
                             <div className={`p-5 rounded-2xl ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
                                 <h3 className={`text-sm font-semibold uppercase tracking-wider mb-4 ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>
                                     Probar Configuración
                                 </h3>
                                 <div className="flex gap-3">
-                                    <input 
-                                        type="email" 
-                                        placeholder="test@ejemplo.com" 
-                                        className={`flex-1 ${inputClass}`} 
-                                        value={testEmail} 
-                                        onChange={(e) => setTestEmail(e.target.value)} 
+                                    <input
+                                        type="email"
+                                        placeholder="test@ejemplo.com"
+                                        className={`flex-1 ${inputClass}`}
+                                        value={testEmail}
+                                        onChange={(e) => setTestEmail(e.target.value)}
                                     />
-                                    <button 
-                                        onClick={handleTestEmail} 
-                                        disabled={testingEmail || !settings.smtpHost || !settings.smtpUser} 
+                                    <button
+                                        onClick={handleTestEmail}
+                                        disabled={testingEmail || !settings.smtpHost || !settings.smtpUser}
                                         className="flex items-center gap-2 px-5 py-3 bg-green-600 text-white rounded-xl hover:bg-green-700 font-medium whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                                     >
                                         {testingEmail ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
@@ -954,11 +958,11 @@ const AdminPage = () => {
                                 </p>
                             </div>
                             <div className="flex-1 min-h-0">
-                                <EmailTemplateEditor 
-                                    templates={settings.emailTemplates ? JSON.parse(settings.emailTemplates) : null} 
-                                    onSave={handleSaveTemplates} 
-                                    onToast={setToast} 
-                                    logoUrl={settings.logoDark} 
+                                <EmailTemplateEditor
+                                    templates={settings.emailTemplates ? JSON.parse(settings.emailTemplates) : null}
+                                    onSave={handleSaveTemplates}
+                                    onToast={setToast}
+                                    logoUrl={settings.logoDark}
                                 />
                             </div>
                         </div>
@@ -968,13 +972,13 @@ const AdminPage = () => {
 
             {/* Footer Actions */}
             <div className={`mt-auto pt-6 border-t flex justify-end gap-3 flex-shrink-0 ${isDark ? 'border-zinc-800' : 'border-zinc-200'}`}>
-                <button 
+                <button
                     onClick={handleDiscard}
                     className={`px-6 py-2.5 rounded-xl font-medium transition-colors ${isDark ? 'text-zinc-400 hover:text-white hover:bg-white/5' : 'text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100'}`}
                 >
                     Descartar
                 </button>
-                <button 
+                <button
                     onClick={handleSaveAll}
                     disabled={saving}
                     className="px-6 py-2.5 bg-red-600 text-white rounded-xl hover:bg-red-500 font-medium transition-colors disabled:opacity-50 flex items-center gap-2"
@@ -985,23 +989,32 @@ const AdminPage = () => {
             </div>
 
             {/* Modals */}
-            <ConfirmModal 
-                isOpen={deleteUserModal.isOpen} 
-                onClose={() => setDeleteUserModal({ isOpen: false, userId: null, username: '' })} 
-                onConfirm={() => handleDeleteUser(deleteUserModal.userId)} 
-                title="Eliminar usuario" 
-                message={`¿Eliminar a "${deleteUserModal.username}" y todos sus archivos?`} 
-                confirmText="Eliminar" 
-                variant="danger" 
+            <ConfirmModal
+                isOpen={deleteUserModal.isOpen}
+                onClose={() => setDeleteUserModal({ isOpen: false, userId: null, username: '' })}
+                onConfirm={() => handleDeleteUser(deleteUserModal.userId)}
+                title="Eliminar usuario"
+                message={`¿Eliminar a "${deleteUserModal.username}" y todos sus archivos?`}
+                confirmText="Eliminar"
+                variant="danger"
             />
-            <ConfirmModal 
-                isOpen={deleteFileModal.isOpen} 
-                onClose={() => setDeleteFileModal({ isOpen: false, fileId: null, fileName: '' })} 
-                onConfirm={() => handleDeleteFile(deleteFileModal.fileId)} 
-                title="Eliminar archivo" 
-                message={`¿Eliminar "${deleteFileModal.fileName}"?`} 
-                confirmText="Eliminar" 
-                variant="danger" 
+            <ConfirmModal
+                isOpen={deleteFileModal.isOpen}
+                onClose={() => setDeleteFileModal({ isOpen: false, fileId: null, fileName: '' })}
+                onConfirm={() => handleDeleteFile(deleteFileModal.fileId)}
+                title="Eliminar archivo"
+                message={`¿Eliminar "${deleteFileModal.fileName}"?`}
+                confirmText="Eliminar"
+                variant="danger"
+            />
+            <ConfirmModal
+                isOpen={resetRateLimitModal}
+                onClose={() => setResetRateLimitModal(false)}
+                onConfirm={confirmResetRateLimits}
+                title="Reiniciar Rate Limits"
+                message="¿Estás seguro de que quieres reiniciar todos los límites de velocidad del sistema? Esto permitirá a todos los usuarios realizar acciones sin esperar si estaban bloqueados."
+                confirmText="Reiniciar"
+                variant="warning"
             />
         </div>
     );

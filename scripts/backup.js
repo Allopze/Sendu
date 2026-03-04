@@ -1,5 +1,7 @@
 import fs from 'fs/promises';
+import { existsSync } from 'fs';
 import path from 'path';
+import Database from 'better-sqlite3';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -30,7 +32,21 @@ const copyDir = async (src, dest) => {
 
 const run = async () => {
     await fs.mkdir(backupDir, { recursive: true });
-    await copyDir(dataDir, path.join(backupDir, 'data'));
+
+    // Safe SQLite backup using better-sqlite3 backup API
+    const dbSrc = path.join(dataDir, 'db.sqlite');
+    const dbDestDir = path.join(backupDir, 'data');
+    const dbDest = path.join(dbDestDir, 'db.sqlite');
+    await fs.mkdir(dbDestDir, { recursive: true });
+    if (existsSync(dbSrc)) {
+        const db = new Database(dbSrc, { readonly: true });
+        db.backup(dbDest);
+        db.close();
+        console.log('Database backed up safely via SQLite backup API');
+    } else {
+        console.warn('No database file found, skipping database backup');
+    }
+
     await copyDir(uploadsDir, path.join(backupDir, 'uploads'));
     await copyDir(brandingDir, path.join(backupDir, 'branding'));
 

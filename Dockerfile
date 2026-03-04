@@ -30,9 +30,8 @@ RUN npm run build
 FROM base AS runner
 WORKDIR /app
 
-# Create non-root user for security
-RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 sendu
+# Use the built-in 'node' user (UID 1000, GID 1000) for host volume compatibility
+# node:20-alpine already provides user 'node' with UID/GID 1000
 
 # Copy backend
 COPY --from=deps /app/node_modules ./node_modules
@@ -45,10 +44,10 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
 # Create directories for data persistence
 RUN mkdir -p /app/uploads /app/tmp /app/backend/logs /app/data /app/branding && \
-    chown -R sendu:nodejs /app
+    chown -R node:node /app
 
 # Switch to non-root user
-USER sendu
+USER node
 
 # Environment variables (override in docker-compose or runtime)
 ENV NODE_ENV=production

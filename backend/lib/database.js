@@ -37,6 +37,7 @@ export async function initDatabase(filePath) {
     dbInstance.pragma('journal_mode = WAL');
     dbInstance.pragma('synchronous = NORMAL');
     dbInstance.pragma('foreign_keys = ON');
+    dbInstance.pragma('busy_timeout = 5000');
 
     return dbInstance;
 }
@@ -60,6 +61,7 @@ export function forceSave() {
  */
 export function closeDatabase() {
     if (dbInstance) {
+        try { dbInstance.pragma('wal_checkpoint(TRUNCATE)'); } catch {}
         dbInstance.close();
     }
     dbInstance = null;

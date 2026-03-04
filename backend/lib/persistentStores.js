@@ -31,7 +31,7 @@ const ensureRateLimitTable = () => {
 export function initPersistentStores(database) {
     db = database;
     createTables();
-    
+
     // Start cleanup interval (every 5 minutes)
     setInterval(cleanupExpired, 5 * 60 * 1000);
 }
@@ -85,7 +85,7 @@ function createTables() {
     } catch (err) {
         logger.warn('Could not check guest_uploads migration', { error: err.message });
     }
-    
+
     db.exec(`CREATE INDEX IF NOT EXISTS idx_guest_last_upload ON guest_uploads(lastUpload)`);
 
     // Download tokens table
@@ -120,22 +120,22 @@ function cleanupExpired() {
     try {
         // Cleanup CSRF tokens
         const csrfResult = db.prepare('DELETE FROM csrf_tokens WHERE expires_at < ?').run(now);
-        
+
         // Cleanup download tokens
         const downloadResult = db.prepare('DELETE FROM download_tokens WHERE expires_at < ?').run(now);
-        
+
         // Cleanup sessions
         const sessionResult = db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(now);
-        
+
         // Cleanup guest uploads older than 24 hours
         const oneDayAgo = now - (24 * 60 * 60 * 1000);
         const guestResult = db.prepare('DELETE FROM guest_uploads WHERE lastUpload < ?').run(oneDayAgo);
-        
-        const totalCleaned = (csrfResult?.changes || 0) + (downloadResult?.changes || 0) + 
-                            (sessionResult?.changes || 0) + (guestResult?.changes || 0);
-        
+
+        const totalCleaned = (csrfResult?.changes || 0) + (downloadResult?.changes || 0) +
+            (sessionResult?.changes || 0) + (guestResult?.changes || 0);
+
         if (totalCleaned > 0) {
-            logger.debug('Cleaned up expired persistent store entries', { 
+            logger.debug('Cleaned up expired persistent store entries', {
                 csrf: csrfResult?.changes || 0,
                 downloads: downloadResult?.changes || 0,
                 sessions: sessionResult?.changes || 0,
@@ -160,7 +160,7 @@ export function generateCsrfToken(sessionId) {
     const token = crypto.randomBytes(32).toString('hex');
     const expiresAt = Date.now() + (60 * 60 * 1000); // 1 hour
     const key = `${sessionId}:${token}`;
-    
+
     try {
         db.prepare(`
             INSERT OR REPLACE INTO csrf_tokens (key, session_id, expires_at) 
@@ -169,32 +169,32 @@ export function generateCsrfToken(sessionId) {
     } catch (err) {
         logger.error('Error storing CSRF token', { error: err.message });
     }
-    
+
     return token;
 }
 
 /**
- * Validate and consume a CSRF token
+ * Validate and consume a CSRF token (atomic operation to prevent race conditions)
  * @param {string} sessionId - The session ID
  * @param {string} token - The token to validate
  * @returns {boolean} Whether the token is valid
  */
 export function validateCsrfToken(sessionId, token) {
     const key = `${sessionId}:${token}`;
-    
+    const now = Date.now();
+
     try {
-        const row = db.prepare('SELECT * FROM csrf_tokens WHERE key = ?').get(key);
-        
-        if (!row) return false;
-        if (Date.now() > row.expires_at) {
-            db.prepare('DELETE FROM csrf_tokens WHERE key = ?').run(key);
-            return false;
-        }
-        if (row.session_id !== sessionId) return false;
-        
-        // Single-use token - delete after validation
-        db.prepare('DELETE FROM csrf_tokens WHERE key = ?').run(key);
-        return true;
+        // Atomic delete with conditions - only deletes if token exists, is not expired, and matches session
+        // This prevents race conditions where two requests could validate the same token
+        const result = db.prepare(`
+            DELETE FROM csrf_tokens 
+            WHERE key = ? 
+              AND session_id = ? 
+              AND expires_at > ?
+        `).run(key, sessionId, now);
+
+        // If a row was deleted, the token was valid
+        return result.changes > 0;
     } catch (err) {
         logger.error('Error validating CSRF token', { error: err.message });
         return false;
@@ -241,7 +241,7 @@ export function recordGuestUploadPersistent(fingerprint, bytes) {
     try {
         const existing = db.prepare('SELECT * FROM guest_uploads WHERE fingerprint = ?').get(fingerprint);
         const now = Date.now();
-        
+
         if (existing) {
             db.prepare(`
                 UPDATE guest_uploads 
@@ -254,11 +254,11 @@ export function recordGuestUploadPersistent(fingerprint, bytes) {
                 VALUES (?, ?, 1, ?, ?)
             `).run(fingerprint, bytes, now, now);
         }
-        
-        logger.info('Guest upload recorded', { 
-            fingerprint: fingerprint.substring(0, 8) + '...', 
-            bytes, 
-            totalBytes: (existing?.totalBytes || 0) + bytes 
+
+        logger.info('Guest upload recorded', {
+            fingerprint: fingerprint.substring(0, 8) + '...',
+            bytes,
+            totalBytes: (existing?.totalBytes || 0) + bytes
         });
     } catch (err) {
         logger.error('Error recording guest upload', { error: err.message });
@@ -275,18 +275,18 @@ export function recordGuestUploadPersistent(fingerprint, bytes) {
 export function canGuestUploadPersistent(fingerprint, fileSize, limitBytes) {
     const currentTotal = getGuestUploadTotal(fingerprint);
     const remaining = Math.max(0, limitBytes - currentTotal);
-    
+
     if (fileSize > remaining) {
         const usedMB = Math.round(currentTotal / (1024 * 1024));
         const limitMB = Math.round(limitBytes / (1024 * 1024));
-        
+
         return {
             allowed: false,
             remaining,
             message: `Has alcanzado el límite de subida para invitados (${usedMB}MB de ${limitMB}MB usados). Crea una cuenta para subir más archivos.`
         };
     }
-    
+
     return { allowed: true, remaining };
 }
 
@@ -303,7 +303,7 @@ export function canGuestUploadPersistent(fingerprint, fileSize, limitBytes) {
 export function createDownloadToken(fileId, ttlMs = 5 * 60 * 1000) {
     const token = crypto.randomUUID();
     const expiresAt = Date.now() + ttlMs;
-    
+
     try {
         db.prepare(`
             INSERT INTO download_tokens (token, file_id, expires_at) 
@@ -312,7 +312,7 @@ export function createDownloadToken(fileId, ttlMs = 5 * 60 * 1000) {
     } catch (err) {
         logger.error('Error creating download token', { error: err.message });
     }
-    
+
     return token;
 }
 
@@ -324,18 +324,13 @@ export function createDownloadToken(fileId, ttlMs = 5 * 60 * 1000) {
  */
 export function validateDownloadToken(token, fileId) {
     try {
-        const row = db.prepare('SELECT * FROM download_tokens WHERE token = ?').get(token);
-        
-        if (!row) return false;
-        if (Date.now() > row.expires_at) {
-            db.prepare('DELETE FROM download_tokens WHERE token = ?').run(token);
-            return false;
-        }
-        if (row.file_id !== fileId) return false;
-        
-        // Single-use token - delete after validation
-        db.prepare('DELETE FROM download_tokens WHERE token = ?').run(token);
-        return true;
+        // Atomic single-use validation: DELETE + return in one statement
+        // Prevents race conditions where two requests could reuse the same token
+        const row = db.prepare(
+            'DELETE FROM download_tokens WHERE token = ? AND file_id = ? AND expires_at > ? RETURNING *'
+        ).get(token, fileId, Date.now());
+
+        return !!row;
     } catch (err) {
         logger.error('Error validating download token', { error: err.message });
         return false;
@@ -353,49 +348,49 @@ export function validateDownloadToken(token, fileId) {
  */
 export function createSqliteSessionStore(session) {
     const Store = session.Store;
-    
+
     class SqliteStore extends Store {
         constructor(options = {}) {
             super(options);
         }
-        
+
         get(sid, callback) {
             try {
                 const row = db.prepare('SELECT sess, expires_at FROM sessions WHERE sid = ?').get(sid);
-                
+
                 if (!row) {
                     return callback(null, null);
                 }
-                
+
                 if (Date.now() > row.expires_at) {
-                    this.destroy(sid, () => {});
+                    this.destroy(sid, () => { });
                     return callback(null, null);
                 }
-                
+
                 const sess = JSON.parse(row.sess);
                 callback(null, sess);
             } catch (err) {
                 callback(err);
             }
         }
-        
+
         set(sid, sess, callback) {
             try {
                 const maxAge = sess.cookie?.maxAge || (30 * 24 * 60 * 60 * 1000); // Default 30 days
                 const expiresAt = Date.now() + maxAge;
                 const sessJson = JSON.stringify(sess);
-                
+
                 db.prepare(`
                     INSERT OR REPLACE INTO sessions (sid, sess, expires_at) 
                     VALUES (?, ?, ?)
                 `).run(sid, sessJson, expiresAt);
-                
+
                 callback(null);
             } catch (err) {
                 callback(err);
             }
         }
-        
+
         destroy(sid, callback) {
             try {
                 db.prepare('DELETE FROM sessions WHERE sid = ?').run(sid);
@@ -404,19 +399,19 @@ export function createSqliteSessionStore(session) {
                 callback(err);
             }
         }
-        
+
         touch(sid, sess, callback) {
             try {
                 const maxAge = sess.cookie?.maxAge || (30 * 24 * 60 * 60 * 1000);
                 const expiresAt = Date.now() + maxAge;
-                
+
                 db.prepare('UPDATE sessions SET expires_at = ? WHERE sid = ?').run(expiresAt, sid);
                 callback(null);
             } catch (err) {
                 callback(err);
             }
         }
-        
+
         clear(callback) {
             try {
                 db.prepare('DELETE FROM sessions').run();
@@ -425,7 +420,7 @@ export function createSqliteSessionStore(session) {
                 callback(err);
             }
         }
-        
+
         length(callback) {
             try {
                 const row = db.prepare('SELECT COUNT(*) as count FROM sessions WHERE expires_at > ?').get(Date.now());
@@ -434,7 +429,7 @@ export function createSqliteSessionStore(session) {
                 callback(err);
             }
         }
-        
+
         all(callback) {
             try {
                 const rows = db.prepare('SELECT sid, sess FROM sessions WHERE expires_at > ?').all(Date.now());
@@ -448,7 +443,7 @@ export function createSqliteSessionStore(session) {
             }
         }
     }
-    
+
     return SqliteStore;
 }
 
@@ -477,7 +472,7 @@ export function createRateLimitStore(windowMs = 60000, options = {}) {
             return String(key);
         }
     };
-    
+
     return {
         init: async () => {
             if (!db) return;
@@ -485,7 +480,7 @@ export function createRateLimitStore(windowMs = 60000, options = {}) {
             // Cleanup expired entries on init
             db.prepare('DELETE FROM rate_limits WHERE reset_at < ?').run(Date.now());
         },
-        
+
         increment: async (key) => {
             const now = Date.now();
             const keyValue = keyPrefix ? `${keyPrefix}:${normalizeKey(key)}` : normalizeKey(key);
@@ -493,10 +488,10 @@ export function createRateLimitStore(windowMs = 60000, options = {}) {
                 return { totalHits: 1, resetTime: new Date(now + windowMs) };
             }
             ensureTables();
-            
+
             try {
                 const existing = db.prepare('SELECT count, reset_at FROM rate_limits WHERE key = ?').get(keyValue);
-                
+
                 if (!existing || now > existing.reset_at) {
                     // Entry doesn't exist or expired - create new
                     const resetAt = now + windowMs;
@@ -506,20 +501,20 @@ export function createRateLimitStore(windowMs = 60000, options = {}) {
                     `).run(keyValue, resetAt);
                     return { totalHits: 1, resetTime: new Date(resetAt) };
                 }
-                
+
                 // Increment existing
                 db.prepare('UPDATE rate_limits SET count = count + 1 WHERE key = ?').run(keyValue);
-                
-                return { 
-                    totalHits: existing.count + 1, 
-                    resetTime: new Date(existing.reset_at) 
+
+                return {
+                    totalHits: existing.count + 1,
+                    resetTime: new Date(existing.reset_at)
                 };
             } catch (err) {
                 logger.error('Rate limit increment error', { error: err.message });
                 return { totalHits: 1, resetTime: new Date(now + windowMs) };
             }
         },
-        
+
         decrement: async (key) => {
             try {
                 if (!db) return;
@@ -530,7 +525,7 @@ export function createRateLimitStore(windowMs = 60000, options = {}) {
                 logger.error('Rate limit decrement error', { error: err.message });
             }
         },
-        
+
         resetKey: async (key) => {
             try {
                 if (!db) return;
@@ -541,7 +536,7 @@ export function createRateLimitStore(windowMs = 60000, options = {}) {
                 logger.error('Rate limit reset error', { error: err.message });
             }
         },
-        
+
         shutdown: async () => {
             // No cleanup needed for SQLite
         }

@@ -1,8 +1,8 @@
 import crypto from 'crypto';
 
-// Encryption key derived from SESSION_SECRET (must be 32 bytes for AES-256)
+// Encryption key derived from ENCRYPTION_KEY (preferred) or SESSION_SECRET fallback (must be 32 bytes for AES-256)
 const getEncryptionKey = () => {
-    const secret = process.env.SESSION_SECRET || 'dev-secret';
+    const secret = process.env.ENCRYPTION_KEY || process.env.SESSION_SECRET || 'dev-secret';
     return crypto.createHash('sha256').update(secret).digest();
 };
 

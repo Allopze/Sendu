@@ -32,6 +32,18 @@ const copyDir = async (src, dest) => {
 };
 
 const run = async () => {
+    // Safety check: refuse to restore while the server is running
+    try {
+        const res = await fetch('http://localhost:3000/api/health', { signal: AbortSignal.timeout(2000) });
+        if (res.ok) {
+            console.error('ERROR: Sendu server is running. Stop it before restoring.');
+            console.error('  docker compose down   # or: kill the node process');
+            process.exit(1);
+        }
+    } catch {
+        // Server not reachable — safe to proceed
+    }
+
     await copyDir(path.join(backupDir, 'data'), dataDir);
     await copyDir(path.join(backupDir, 'uploads'), uploadsDir);
     await copyDir(path.join(backupDir, 'branding'), brandingDir);
