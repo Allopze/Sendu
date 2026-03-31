@@ -1,5 +1,31 @@
-const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '');
-const UPLOAD_API_BASE = (import.meta.env.VITE_UPLOAD_API_BASE || API_BASE).replace(/\/$/, '');
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+
+const normalizeBase = (value, fallback = '/api') => (value || fallback).replace(/\/$/, '');
+
+const resolveApiBase = (value, fallback = '/api') => {
+    const normalized = normalizeBase(value, fallback);
+
+    if (typeof window === 'undefined') {
+        return normalized;
+    }
+
+    // In local/previews we prefer same-origin requests even if the production
+    // build baked an absolute API host. This keeps packaged builds testable
+    // without weakening the deployed production configuration.
+    if (/^https?:\/\//i.test(normalized) && LOCAL_HOSTNAMES.has(window.location.hostname)) {
+        try {
+            const parsed = new URL(normalized);
+            return `${window.location.origin}${parsed.pathname}`.replace(/\/$/, '');
+        } catch {
+            return normalized;
+        }
+    }
+
+    return normalized;
+};
+
+const API_BASE = resolveApiBase(import.meta.env.VITE_API_BASE, '/api');
+const UPLOAD_API_BASE = resolveApiBase(import.meta.env.VITE_UPLOAD_API_BASE, API_BASE);
 
 // Helper to get CSRF token from cookie
 const getCsrfToken = () => {
@@ -7,23 +33,70 @@ const getCsrfToken = () => {
     return match ? match[1] : null;
 };
 
-// Helper for requests that need CSRF token
-const fetchWithCsrf = (url, options = {}) => {
-    const csrfToken = getCsrfToken();
-    const headers = {
-        ...options.headers,
-    };
-    
-    // Add CSRF token for state-changing requests
-    if (csrfToken && !['GET', 'HEAD', 'OPTIONS'].includes(options.method?.toUpperCase())) {
-        headers['x-csrf-token'] = csrfToken;
+let csrfBootstrapPromise = null;
+
+const ensureCsrfToken = async ({ force = false } = {}) => {
+    const existingToken = getCsrfToken();
+    if ((existingToken && !force) || typeof document === 'undefined') {
+        return existingToken;
     }
-    
-    return fetch(url, {
+
+    if (!csrfBootstrapPromise) {
+        csrfBootstrapPromise = fetch(`${API_BASE}/auth/csrf`, {
+            credentials: 'include'
+        }).catch(() => null).finally(() => {
+            csrfBootstrapPromise = null;
+        });
+    }
+
+    await csrfBootstrapPromise;
+    return getCsrfToken();
+};
+
+const isCsrfFailureResponse = async (response) => {
+    if (!response || response.status !== 403) {
+        return false;
+    }
+
+    try {
+        const data = await response.clone().json();
+        return typeof data?.error === 'string' && data.error.toLowerCase().includes('csrf');
+    } catch {
+        return false;
+    }
+};
+
+// Helper for requests that need CSRF token
+const fetchWithCsrf = async (url, options = {}) => {
+    const method = options.method?.toUpperCase();
+    const requiresCsrf = !['GET', 'HEAD', 'OPTIONS'].includes(method);
+
+    const buildHeaders = async (forceRefresh = false) => {
+        const headers = { ...options.headers };
+        if (!requiresCsrf) {
+            return headers;
+        }
+
+        const csrfToken = await ensureCsrfToken({ force: forceRefresh });
+        if (csrfToken) {
+            headers['x-csrf-token'] = csrfToken;
+        }
+        return headers;
+    };
+
+    const executeRequest = async (forceRefresh = false) => fetch(url, {
         ...options,
-        headers,
+        headers: await buildHeaders(forceRefresh),
         credentials: 'include'
     });
+
+    let response = await executeRequest(false);
+
+    if (requiresCsrf && await isCsrfFailureResponse(response)) {
+        response = await executeRequest(true);
+    }
+
+    return response;
 };
 
 const apiClient = {
@@ -66,12 +139,13 @@ const apiClient = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
     }),
-    uploadChunk: (uploadId, index, chunk, signal) => {
+    uploadChunk: (uploadId, uploadToken, index, chunk, signal) => {
         const formData = new FormData();
         formData.append('chunk', chunk);
         return fetch(`${UPLOAD_API_BASE}/upload/chunk?uploadId=${uploadId}&index=${index}`, {
             method: 'POST',
             credentials: 'include',
+            headers: uploadToken ? { 'x-upload-token': uploadToken } : undefined,
             body: formData,
             signal
         });
@@ -80,6 +154,10 @@ const apiClient = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ uploadId })
+    }),
+    getUploadStatus: (uploadId, uploadToken) => fetch(`${UPLOAD_API_BASE}/upload/status/${uploadId}`, {
+        credentials: 'include',
+        headers: uploadToken ? { 'x-upload-token': uploadToken } : undefined
     }),
     cancelUpload: (uploadId) => fetchWithCsrf(`${UPLOAD_API_BASE}/upload/cancel`, {
         method: 'POST',
@@ -111,6 +189,7 @@ const apiClient = {
         const queryType = encodeURIComponent(type || 'all');
         return fetch(`${API_BASE}/admin/jobs/pending?type=${queryType}&limit=${limit}`, { credentials: 'include' });
     },
+    getAdminMetrics: () => fetch(`${API_BASE}/admin/metrics`, { credentials: 'include' }),
     updateAdminSettings: (data) => fetchWithCsrf(`${API_BASE}/admin/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -181,6 +260,7 @@ const apiClient = {
     }),
 
     // Public
+    getHealthReady: () => fetch(`${API_BASE}/health/ready`, { credentials: 'include' }),
     getPublicSettings: () => fetch(`${API_BASE}/settings/public`),
     getUploadLimits: () => fetch(`${API_BASE}/settings/limits`, { credentials: 'include' }),
 };

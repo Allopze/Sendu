@@ -44,11 +44,18 @@ describe('Upload Init API', () => {
 
     beforeEach(() => {
         db.exec('DELETE FROM users');
+        db.exec("DELETE FROM settings WHERE key LIKE 'smtp%'");
     });
 
     it('should reject upload init for unverified user', async () => {
         const userId = uuidv4();
         const hashedPassword = await bcrypt.hash('Password123', 10);
+        db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?), (?, ?), (?, ?)')
+            .run(
+                'smtpHost', 'smtp.example.com',
+                'smtpUser', 'noreply@example.com',
+                'smtpPass', 'plain-test-secret'
+            );
         db.prepare('INSERT INTO users (id, email, username, passwordHash, isVerified, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
             .run(userId, 'u@example.com', 'user1', hashedPassword, 0, Date.now());
 
@@ -67,6 +74,30 @@ describe('Upload Init API', () => {
             });
 
         expect(res.status).toBe(403);
+    });
+
+    it('should allow upload init for unverified user when SMTP is not configured', async () => {
+        const userId = uuidv4();
+        const hashedPassword = await bcrypt.hash('Password123', 10);
+        db.prepare('INSERT INTO users (id, email, username, passwordHash, isVerified, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
+            .run(userId, 'nosmtp@example.com', 'user-nosmtp', hashedPassword, 0, Date.now());
+
+        const agent = request.agent(app);
+        await agent.post('/api/auth/login').send({ login: 'nosmtp@example.com', password: 'Password123' });
+        const csrfRes = await agent.get('/api/auth/me');
+        const csrfToken = extractCsrfToken(csrfRes);
+
+        const res = await agent.post('/api/upload/init')
+            .set('x-csrf-token', csrfToken)
+            .send({
+                originalName: 'test.txt',
+                size: 1024,
+                mimeType: 'text/plain',
+                totalChunks: 1
+            });
+
+        expect(res.status).toBe(200);
+        expect(res.body.uploadId).toBeDefined();
     });
 
     it('should allow upload init for verified user', async () => {

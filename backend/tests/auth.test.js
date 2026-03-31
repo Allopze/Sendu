@@ -19,6 +19,13 @@ let db;
 let app;
 let startServer;
 
+const extractCsrfToken = (response) => {
+    const cookies = response.headers['set-cookie'] || [];
+    const csrfCookie = cookies.find((cookie) => cookie.startsWith('csrf-token='));
+    if (!csrfCookie) return null;
+    return csrfCookie.split(';')[0].split('=')[1] || null;
+};
+
 describe('Auth API', () => {
     beforeAll(async () => {
         const serverModule = await import('../server.js');
@@ -41,6 +48,7 @@ describe('Auth API', () => {
 
     beforeEach(() => {
         // Clear users table before each test
+        db.exec('DELETE FROM files');
         db.exec('DELETE FROM users');
     });
 
@@ -56,6 +64,40 @@ describe('Auth API', () => {
 
             expect(res.status).toBe(201);
             expect(res.body.message).toContain('Usuario registrado');
+            expect(res.body.emailDeliveryEnabled).toBe(false);
+            expect(res.body.requiresEmailVerification).toBe(false);
+        });
+
+        it('should not promote the first public registration to admin without bootstrap token', async () => {
+            const res = await request(app)
+                .post('/api/auth/register')
+                .send({
+                    email: 'first@example.com',
+                    username: 'firstuser',
+                    password: 'Password123'
+                });
+
+            expect(res.status).toBe(201);
+
+            const user = db.prepare('SELECT role FROM users WHERE email = ?').get('first@example.com');
+            expect(user.role).toBe('user');
+        });
+
+        it('should auto-verify new users when SMTP is not configured', async () => {
+            const res = await request(app)
+                .post('/api/auth/register')
+                .send({
+                    email: 'autoverified@example.com',
+                    username: 'autoverified',
+                    password: 'Password123'
+                });
+
+            expect(res.status).toBe(201);
+            expect(res.body.message).toContain('ya puedes iniciar sesión');
+
+            const user = db.prepare('SELECT isVerified, verificationToken FROM users WHERE email = ?').get('autoverified@example.com');
+            expect(user.isVerified).toBe(1);
+            expect(user.verificationToken).toBeNull();
         });
 
         it('should reject invalid email format', async () => {
@@ -205,6 +247,87 @@ describe('Auth API', () => {
                 .get('/api/auth/me');
 
             expect(res.status).toBe(401);
+        });
+
+        it('should not expose internal file fields in /api/user/files', async () => {
+            const userId = uuidv4();
+            const accountPassword = 'Password123';
+            const hashedPassword = await bcrypt.hash(accountPassword, 10);
+
+            db.prepare('INSERT INTO users (id, email, username, passwordHash, createdAt) VALUES (?, ?, ?, ?, ?)')
+                .run(userId, 'owner@example.com', 'owneruser', hashedPassword, Date.now());
+
+            db.prepare(`
+                INSERT INTO files (id, originalName, serverPath, mimeType, size, createdAt, userId, passwordHash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(uuidv4(), 'secret.txt', '/tmp/secret.txt', 'text/plain', 128, Date.now(), userId, await bcrypt.hash('Transfer123', 10));
+
+            const agent = request.agent(app);
+            const loginRes = await agent
+                .post('/api/auth/login')
+                .send({
+                    login: 'owner@example.com',
+                    password: accountPassword
+                });
+
+            expect(loginRes.status).toBe(200);
+
+            const filesRes = await agent.get('/api/user/files');
+            expect(filesRes.status).toBe(200);
+            expect(filesRes.body.files).toHaveLength(1);
+            expect(filesRes.body.files[0].hasPassword).toBe(true);
+            expect(filesRes.body.files[0].passwordHash).toBeUndefined();
+            expect(filesRes.body.files[0].serverPath).toBeUndefined();
+        });
+    });
+
+    describe('email-dependent auth flows without SMTP', () => {
+        it('should return 503 for forgot password when SMTP is unavailable', async () => {
+            const res = await request(app)
+                .post('/api/auth/forgot-password')
+                .send({ email: 'missing@example.com' });
+
+            expect(res.status).toBe(503);
+            expect(res.body.error).toContain('no está disponible');
+        });
+
+        it('should auto-verify an authenticated user when resending verification without SMTP', async () => {
+            const hashedPassword = await bcrypt.hash('Password123', 10);
+            const userId = uuidv4();
+            db.prepare(`
+                INSERT INTO users (id, email, username, passwordHash, isVerified, verificationToken, verificationTokenExpires, createdAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+                userId,
+                'pending@example.com',
+                'pendinguser',
+                hashedPassword,
+                0,
+                'hashed-token',
+                Date.now() + 60_000,
+                Date.now()
+            );
+
+            const agent = request.agent(app);
+            const loginRes = await agent
+                .post('/api/auth/login')
+                .send({ login: 'pending@example.com', password: 'Password123' });
+
+            expect(loginRes.status).toBe(200);
+
+            const csrfRes = await agent.get('/api/auth/me');
+            const csrfToken = extractCsrfToken(csrfRes);
+
+            const resendRes = await agent
+                .post('/api/auth/resend-verification')
+                .set('x-csrf-token', csrfToken)
+                .send({});
+            expect(resendRes.status).toBe(200);
+            expect(resendRes.body.autoVerified).toBe(true);
+
+            const user = db.prepare('SELECT isVerified, verificationToken FROM users WHERE id = ?').get(userId);
+            expect(user.isVerified).toBe(1);
+            expect(user.verificationToken).toBeNull();
         });
     });
 

@@ -26,7 +26,12 @@ export const ToastProvider = ({ children }) => {
         <ToastContext.Provider value={{ showToast, success, error, info, warning }}>
             {children}
             {/* Toast Container */}
-            <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-3">
+            <div
+                className="fixed bottom-6 right-6 z-50 flex flex-col gap-3"
+                aria-live="polite"
+                aria-atomic="true"
+                role="status"
+            >
                 {toasts.map((toast) => (
                     <Toast
                         key={toast.id}

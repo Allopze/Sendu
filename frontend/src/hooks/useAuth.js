@@ -24,7 +24,8 @@ const useAuth = () => {
     const register = async (data) => {
         const res = await apiClient.register(data);
         if (res.ok) {
-            return { success: true };
+            const payload = await res.json();
+            return { success: true, ...payload };
         }
         const err = await res.json();
         return { success: false, error: err.error };

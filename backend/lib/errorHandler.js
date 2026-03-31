@@ -30,33 +30,38 @@ export const globalErrorHandler = (err, req, res, next) => {
     // Handle specific error types
     if (err.code === 'EBADCSRFTOKEN') {
         return res.status(403).json({ 
-            error: 'Token CSRF inválido. Por favor, recarga la página e intenta de nuevo.' 
+            error: 'Token CSRF inválido. Por favor, recarga la página e intenta de nuevo.',
+            requestId: req.requestId || null
         });
     }
     
     if (err.code === 'LIMIT_FILE_SIZE') {
         return res.status(413).json({ 
-            error: 'El archivo excede el tamaño máximo permitido.' 
+            error: 'El archivo excede el tamaño máximo permitido.',
+            requestId: req.requestId || null
         });
     }
     
     if (err.type === 'entity.parse.failed') {
         return res.status(400).json({ 
-            error: 'Formato de solicitud inválido.' 
+            error: 'Formato de solicitud inválido.',
+            requestId: req.requestId || null
         });
     }
     
     // SQLite constraint errors
     if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
         return res.status(409).json({ 
-            error: 'El recurso ya existe.' 
+            error: 'El recurso ya existe.',
+            requestId: req.requestId || null
         });
     }
     
     // Multer errors
     if (err.name === 'MulterError') {
         return res.status(400).json({ 
-            error: `Error de subida: ${err.message}` 
+            error: `Error de subida: ${err.message}`,
+            requestId: req.requestId || null
         });
     }
     
@@ -68,6 +73,7 @@ export const globalErrorHandler = (err, req, res, next) => {
     
     res.status(statusCode).json({ 
         error: message,
+        requestId: req.requestId || null,
         ...(process.env.NODE_ENV !== 'production' && { stack: err.stack })
     });
 };
@@ -76,7 +82,10 @@ export const globalErrorHandler = (err, req, res, next) => {
  * Not found handler for unmatched routes
  */
 export const notFoundHandler = (req, res) => {
-    res.status(404).json({ error: 'Ruta no encontrada' });
+    res.status(404).json({
+        error: 'Ruta no encontrada',
+        requestId: req.requestId || null
+    });
 };
 
 /**

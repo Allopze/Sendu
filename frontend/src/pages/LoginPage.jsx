@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import useAuth from '../hooks/useAuth';
 import { useToast } from '../context/ToastContext';
 import { useTheme } from '../context/ThemeContext';
+import { useBranding } from '../context/BrandingContext';
 import { User } from 'lucide-react';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
@@ -14,6 +15,8 @@ const LoginPage = () => {
     const navigate = useNavigate();
     const toast = useToast();
     const { isDark } = useTheme();
+    const { settings } = useBranding();
+    const passwordResetEnabled = settings.passwordResetEnabled !== false;
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -60,9 +63,12 @@ const LoginPage = () => {
                 <Input
                     label="Email o Usuario"
                     type="text"
-                    placeholder="usuario@ejemplo.com"
+                    placeholder="usuario@ejemplo.com…"
                     value={formData.login}
                     onChange={(e) => setFormData({ ...formData, login: e.target.value })}
+                    name="login"
+                    autoComplete="username"
+                    spellCheck={false}
                     required
                     disabled={loading}
                 />
@@ -70,16 +76,23 @@ const LoginPage = () => {
                     <Input
                         label="Contraseña"
                         type="password"
-                        placeholder=""
+                        name="password"
+                        autoComplete="current-password"
                         value={formData.password}
                         onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                         required
                         disabled={loading}
                     />
                     <div className="flex justify-end mt-1">
-                        <Link to="/forgot-password" className="text-xs text-red-500 hover:underline">
-                            ¿Olvidaste tu contraseña?
-                        </Link>
+                        {passwordResetEnabled ? (
+                            <Link to="/forgot-password" className="text-xs text-red-500 hover:underline">
+                                ¿Olvidaste tu contraseña?
+                            </Link>
+                        ) : (
+                            <span className={`text-xs ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                Recuperación por email no disponible
+                            </span>
+                        )}
                     </div>
                 </div>
                 
@@ -88,7 +101,7 @@ const LoginPage = () => {
                     className="w-full"
                     loading={loading}
                 >
-                    {loading ? 'Iniciando sesión...' : 'Iniciar Sesión'}
+                    {loading ? 'Iniciando sesión…' : 'Iniciar Sesión'}
                 </Button>
             </form>
 

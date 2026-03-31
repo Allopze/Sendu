@@ -74,14 +74,32 @@ describe('E2E Upload/Download', () => {
 
         expect(initRes.status).toBe(200);
         expect(initRes.body.uploadId).toBeDefined();
+        expect(initRes.body.uploadToken).toBeDefined();
 
         const uploadId = initRes.body.uploadId;
+        const uploadToken = initRes.body.uploadToken;
 
-        const chunkRes = await agent
+        const forbiddenChunkRes = await request(app)
             .post(`/api/upload/chunk?uploadId=${uploadId}&index=0`)
             .attach('chunk', content, 'hello.txt');
 
+        expect(forbiddenChunkRes.status).toBe(403);
+
+        const chunkRes = await agent
+            .post(`/api/upload/chunk?uploadId=${uploadId}&index=0`)
+            .set('x-upload-token', uploadToken)
+            .attach('chunk', content, 'hello.txt');
+
         expect(chunkRes.status).toBe(200);
+
+        const statusRes = await agent
+            .get(`/api/upload/status/${uploadId}`)
+            .set('x-upload-token', uploadToken);
+
+        expect(statusRes.status).toBe(200);
+        expect(statusRes.body.completedChunks).toEqual([0]);
+        expect(statusRes.body.totalChunks).toBe(1);
+        expect(statusRes.body.status).toBe('initiated');
 
         const completeRes = await agent
             .post('/api/upload/complete')

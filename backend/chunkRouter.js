@@ -23,6 +23,7 @@ import checkDiskSpace from 'check-disk-space';
 import { getCachedUpload, setCachedUpload } from './lib/uploadCache.js';
 import { metrics } from './lib/metrics.js';
 import logger from './lib/logger.js';
+import { validateUploadSessionToken } from './lib/uploadSessionToken.js';
 
 /**
  * Crear el router de chunks optimizado
@@ -165,10 +166,20 @@ export const createChunkRouter = (options) => {
             // Validate upload session state (DB-backed)
             const db = typeof getDb === 'function' ? getDb() : null;
             if (db) {
-                const session = db.prepare('SELECT status, createdAt FROM upload_sessions WHERE uploadId = ?').get(uploadId);
+                const session = db.prepare('SELECT status, createdAt, userId, ipFingerprint FROM upload_sessions WHERE uploadId = ?').get(uploadId);
                 if (!session) {
                     try { await fsPromises.unlink(req.file.path); } catch {}
                     return res.status(404).json({ error: 'Sesión de subida no encontrada' });
+                }
+                const uploadToken = req.get('x-upload-token') || req.query.uploadToken;
+                if (!validateUploadSessionToken({
+                    uploadId,
+                    token: uploadToken,
+                    userId: session.userId || null,
+                    ipFingerprint: session.ipFingerprint || null,
+                })) {
+                    try { await fsPromises.unlink(req.file.path); } catch {}
+                    return res.status(403).json({ error: 'No autorizado para esta sesión de subida' });
                 }
                 if (session.status === 'cancelled' || session.status === 'completed') {
                     try { await fsPromises.unlink(req.file.path); } catch {}

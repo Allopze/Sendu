@@ -50,12 +50,18 @@ const Layout = () => {
     return (
         <div className={`h-screen w-full bg-pattern relative transition-colors duration-500 overflow-hidden ${isDark ? 'text-white' : 'text-zinc-900'}`}>
             <GlobalStyles />
+            <a
+                href="#main-content"
+                className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[60] focus:rounded-md focus:bg-red-600 focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-white"
+            >
+                Saltar al contenido principal
+            </a>
             
             {/* Navbar */}
             <Navbar />
 
             {/* Main Content */}
-            <main className="flex items-center justify-center h-[calc(100vh-100px)] -mt-8 px-4 sm:px-6 lg:px-8">
+            <main id="main-content" className="flex items-center justify-center h-[calc(100vh-100px)] -mt-8 px-4 sm:px-6 lg:px-8">
                 {isSmallPanel
                     ? renderPanel('small')
                     : isLargePanel

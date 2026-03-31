@@ -16,6 +16,7 @@ import {
 // Fallback in-memory store (used before persistent stores are initialized)
 const fallbackStore = new Map();
 let usePersistentStore = false;
+const LOOPBACK_HOST_REGEX = /^(localhost|127\.0\.0\.1|\[::1\]|::1)(:\d+)?$/i;
 
 // Clean expired tokens from fallback store every 15 minutes
 setInterval(() => {
@@ -112,13 +113,20 @@ export const csrfProtection = (options = {}) => {
         }
         
         const sessionId = req.session.id || req.sessionID;
+        const requestIsSecure = req.secure || req.get?.('x-forwarded-proto')?.split(',')[0].trim() === 'https';
+        const requestHost = req.get?.('host') || '';
+        const relaxCookiesForLoopback = LOOPBACK_HOST_REGEX.test(requestHost);
         
         // Cookie options - must match session cookie settings for consistency
         const isProduction = process.env.NODE_ENV === 'production';
         const cookieSameSite = process.env.SESSION_COOKIE_SAMESITE || (isProduction ? 'lax' : 'lax');
-        const cookieSecure = process.env.SESSION_COOKIE_SECURE
-            ? process.env.SESSION_COOKIE_SECURE === 'true'
-            : isProduction;
+        const cookieSecure = (!isProduction || relaxCookiesForLoopback)
+            ? false
+            : (
+                process.env.SESSION_COOKIE_SECURE
+                    ? process.env.SESSION_COOKIE_SECURE === 'true'
+                    : requestIsSecure
+            );
         
         const csrfCookieOptions = {
             httpOnly: false, // Must be accessible by JS

@@ -4,6 +4,7 @@ import apiClient from '../api/client';
 import { Mail, ArrowLeft, CheckCircle } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
 import { useTheme } from '../context/ThemeContext';
+import { useBranding } from '../context/BrandingContext';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
 
@@ -13,9 +14,15 @@ const ForgotPasswordPage = () => {
     const [sent, setSent] = useState(false);
     const toast = useToast();
     const { isDark } = useTheme();
+    const { settings } = useBranding();
+    const passwordResetEnabled = settings.passwordResetEnabled !== false;
 
     const handleSubmit = async (e) => {
         e.preventDefault();
+        if (!passwordResetEnabled) {
+            toast.error('La recuperación por email no está disponible en este entorno');
+            return;
+        }
         setLoading(true);
 
         try {
@@ -64,6 +71,31 @@ const ForgotPasswordPage = () => {
         );
     }
 
+    if (!passwordResetEnabled) {
+        return (
+            <div className="w-full animate-enter text-center">
+                <div className={`w-20 h-20 mx-auto rounded-full flex items-center justify-center mb-4 ${
+                    isDark ? 'bg-amber-900/30' : 'bg-amber-100'
+                }`}>
+                    <Mail size={48} className="text-amber-600" />
+                </div>
+                <h2 className={`text-2xl font-bold mb-2 ${isDark ? 'text-white' : 'text-zinc-900'}`}>
+                    Recuperación no disponible
+                </h2>
+                <p className={`mb-6 ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>
+                    Este entorno no tiene SMTP configurado, así que no puede enviar enlaces de recuperación por email.
+                </p>
+                <Link
+                    to="/login"
+                    className="inline-flex items-center gap-2 text-red-500 hover:underline"
+                >
+                    <ArrowLeft size={18} />
+                    Volver al inicio de sesión
+                </Link>
+            </div>
+        );
+    }
+
     return (
         <div className="w-full animate-enter">
             {/* Header */}
@@ -84,9 +116,12 @@ const ForgotPasswordPage = () => {
                 <Input
                     label="Email"
                     type="email"
-                    placeholder="tu@email.com"
+                    placeholder="tu@email.com…"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
+                    name="email"
+                    autoComplete="email"
+                    spellCheck={false}
                     required
                 />
                 <Button 
@@ -94,7 +129,7 @@ const ForgotPasswordPage = () => {
                     className="w-full"
                     loading={loading}
                 >
-                    {loading ? 'Enviando...' : 'Enviar Enlace de Recuperación'}
+                    {loading ? 'Enviando…' : 'Enviar Enlace de Recuperación'}
                 </Button>
             </form>
 

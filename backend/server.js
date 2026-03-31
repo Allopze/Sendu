@@ -35,6 +35,7 @@ import { initJobHandlers } from './lib/jobHandlers.js';
 import { metrics } from './lib/metrics.js';
 import { runMigrations } from './lib/migrations.js';
 import { antivirus } from './lib/antivirus.js';
+import { createUploadSessionToken, validateUploadSessionToken } from './lib/uploadSessionToken.js';
 
 dotenv.config();
 
@@ -62,11 +63,43 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
     ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
     : [PUBLIC_ORIGIN];
 const isProduction = process.env.NODE_ENV === 'production';
+const LOOPBACK_HOST_REGEX = /^(localhost|127\.0\.0\.1|\[::1\]|::1)(:\d+)?$/i;
+const isLoopbackOrigin = (() => {
+    try {
+        const parsed = new URL(PUBLIC_ORIGIN);
+        return LOOPBACK_HOST_REGEX.test(parsed.host);
+    } catch {
+        return false;
+    }
+})();
 const isTest = process.env.NODE_ENV === 'test';
 const PASSWORD_MIN_LENGTH = 8;
 const PASSWORD_POLICY_MESSAGE = `La contraseña debe tener al menos ${PASSWORD_MIN_LENGTH} caracteres, incluyendo letras y números`;
 const SETTINGS_AUDIT_REDACTED = '[REDACTED]';
 const SENSITIVE_SETTINGS_KEYS = new Set(['smtpPass']);
+
+const requestUsesSecureCookies = (req) => {
+    if (!req) return false;
+    if (req.secure) return true;
+
+    const forwardedProto = req.get?.('x-forwarded-proto');
+    if (!forwardedProto) return false;
+
+    return forwardedProto.split(',')[0].trim() === 'https';
+};
+
+const serializeFileForClient = (file) => ({
+    id: file.id,
+    originalName: file.originalName,
+    mimeType: file.mimeType,
+    size: file.size,
+    createdAt: file.createdAt,
+    expiresAt: file.expiresAt || null,
+    maxDownloads: file.maxDownloads || null,
+    downloadCount: file.downloadCount || 0,
+    userId: file.userId || null,
+    hasPassword: Boolean(file.passwordHash),
+});
 
 // Timing-safe string comparison (prevents timing attacks on tokens)
 const safeCompare = (a, b) => {
@@ -356,11 +389,19 @@ app.use(httpLogger);
 // Session Middleware - Uses SQLite store for persistence across restarts and replicas
 // Store is initialized in startServer() after database is ready
 let sessionMiddleware = null;
-const sessionCookieDomain = isProduction ? process.env.SESSION_COOKIE_DOMAIN : null;
+const sessionCookieDomain = (isProduction && !isLoopbackOrigin) ? process.env.SESSION_COOKIE_DOMAIN : null;
 const sessionCookieSameSite = process.env.SESSION_COOKIE_SAMESITE || (isProduction ? 'lax' : 'lax');
-const sessionCookieSecure = process.env.SESSION_COOKIE_SECURE
-    ? process.env.SESSION_COOKIE_SECURE === 'true'
-    : isProduction;
+const sessionCookieSecure = !isProduction
+    ? false
+    : (
+        isLoopbackOrigin
+            ? false
+            : (
+                process.env.SESSION_COOKIE_SECURE
+                    ? process.env.SESSION_COOKIE_SECURE === 'true'
+                    : 'auto'
+            )
+    );
 const setupSessionMiddleware = () => {
     SqliteSessionStore = createSqliteSessionStore(session);
     sessionMiddleware = session({
@@ -439,13 +480,23 @@ const limiter = rateLimit({
     keyGenerator: (req) => ipKeyGenerator(req),
     max: 300, // limit each IP to 300 requests per windowMs (increased for SPA)
     skip: (req) => {
+        const dedicatedRateLimitRoute = req.method === 'POST' && (
+            req.path === '/auth/login' ||
+            req.path === '/auth/register' ||
+            req.path === '/auth/forgot-password' ||
+            req.path === '/auth/reset-password' ||
+            req.path.startsWith('/download/')
+        );
+
         // Exclude admins from rate limiting
         if (req.session?.role === 'admin') return true;
         // Exclude chunk uploads and frequently called public endpoints
         return req.path.startsWith('/upload/chunk') ||
+            dedicatedRateLimitRoute ||
             req.path === '/settings/public' ||
             req.path === '/settings/limits' ||
-            req.path === '/auth/me';
+            req.path === '/auth/me' ||
+            req.path === '/auth/csrf';
     },
     message: { error: 'Demasiadas solicitudes. Espera un momento.' }
 });
@@ -578,6 +629,11 @@ const getSmtpConfig = () => {
     return config;
 };
 
+const isEmailDeliveryEnabled = () => {
+    const config = getSmtpConfig();
+    return Boolean(config.smtpHost && config.smtpUser && config.smtpPass);
+};
+
 // Helper: Get email templates from settings (with fallback to defaults)
 const getEmailTemplates = () => {
     const stmt = db.prepare('SELECT value FROM settings WHERE key = ?');
@@ -638,7 +694,7 @@ const replaceTemplateVariables = (template, variables) => {
 // Helper: Create nodemailer transporter
 const createSmtpTransporter = () => {
     const config = getSmtpConfig();
-    if (!config.smtpHost || !config.smtpUser || !config.smtpPass) {
+    if (!isEmailDeliveryEnabled()) {
         return null;
     }
 
@@ -685,7 +741,7 @@ const sendEmail = async (to, subject, text, html = null) => {
 const sendTemplatedEmail = async (to, templateName, variables = {}, options = {}) => {
     const templates = getEmailTemplates();
     const config = getSmtpConfig();
-    const smtpConfigured = !!(config.smtpHost && config.smtpUser && config.smtpPass);
+    const smtpConfigured = isEmailDeliveryEnabled();
 
     // Helper to ensure absolute URL
     const ensureAbsoluteUrl = (url) => {
@@ -787,6 +843,12 @@ const isValidPassword = (password) => {
 };
 
 // Auth Routes
+app.get('/api/auth/csrf', (req, res) => {
+    res.json({
+        token: typeof req.csrfToken === 'function' ? req.csrfToken() : null
+    });
+});
+
 app.post('/api/auth/register', authLimiter, asyncHandler(async (req, res) => {
     const { email, username, password, adminBootstrapToken } = req.body;
     if (!email || !username || !password) return res.status(400).json({ error: 'Faltan campos requeridos' });
@@ -809,20 +871,17 @@ app.post('/api/auth/register', authLimiter, asyncHandler(async (req, res) => {
     try {
         const hashedPassword = await bcrypt.hash(password, 12);
         const userId = uuidv4();
-
-        // Generate secure verification token (store hash, send plain token)
-        const { token: verificationToken, hash: verificationTokenHash } = generateSecureToken();
-        const verificationTokenExpires = Date.now() + (24 * 60 * 60 * 1000); // 24 hours
+        const verificationRequired = isEmailDeliveryEnabled();
+        const verificationTokenData = verificationRequired ? generateSecureToken() : null;
+        const verificationTokenHash = verificationTokenData?.hash ?? null;
+        const verificationTokenExpires = verificationTokenData ? Date.now() + (24 * 60 * 60 * 1000) : null;
 
         const registerUser = db.transaction(() => {
             const bootstrapSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('adminBootstrapCompleted');
             const bootstrapCompleted = bootstrapSetting?.value === 'true';
-            const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get()?.count || 0;
 
             let bootstrapRequested = false;
-            if (userCount === 0) {
-                bootstrapRequested = true;
-            } else if (!ALLOW_PUBLIC_REGISTRATION) {
+            if (!ALLOW_PUBLIC_REGISTRATION) {
                 if (!ADMIN_BOOTSTRAP_TOKEN || !adminBootstrapToken || !safeCompare(adminBootstrapToken, ADMIN_BOOTSTRAP_TOKEN) || bootstrapCompleted) {
                     const err = new Error('Registro publico deshabilitado');
                     err.status = 403;
@@ -834,30 +893,40 @@ app.post('/api/auth/register', authLimiter, asyncHandler(async (req, res) => {
             }
 
             const role = bootstrapRequested ? 'admin' : 'user';
-            const stmt = db.prepare('INSERT INTO users (id, email, username, passwordHash, role, verificationToken, verificationTokenExpires, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-            stmt.run(userId, email, username, hashedPassword, role, verificationTokenHash, verificationTokenExpires, Date.now());
+            const isVerified = verificationRequired ? 0 : 1;
+            const stmt = db.prepare('INSERT INTO users (id, email, username, passwordHash, role, isVerified, verificationToken, verificationTokenExpires, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+            stmt.run(userId, email, username, hashedPassword, role, isVerified, verificationTokenHash, verificationTokenExpires, Date.now());
 
             if (bootstrapRequested) {
                 db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('adminBootstrapCompleted', 'true');
             }
 
-            return bootstrapRequested;
+            return { bootstrapRequested };
         });
 
-        const bootstrapRequested = registerUser();
+        const { bootstrapRequested } = registerUser();
 
-        // Send verification email using template
-        const verificationLink = `${PUBLIC_ORIGIN}/verify?token=${verificationToken}`;
-        await sendTemplatedEmail(email, 'welcome', {
-            username,
-            email,
-            verificationLink
+        if (verificationRequired && verificationTokenData) {
+            const verificationLink = `${PUBLIC_ORIGIN}/verify?token=${verificationTokenData.token}`;
+            await sendTemplatedEmail(email, 'welcome', {
+                username,
+                email,
+                verificationLink
+            });
+        }
+
+        const message = verificationRequired
+            ? (bootstrapRequested
+                ? 'Usuario registrado como administrador. Por favor verifica tu email.'
+                : 'Usuario registrado. Por favor verifica tu email.')
+            : (bootstrapRequested
+                ? 'Usuario registrado como administrador. El email está deshabilitado en este entorno, ya puedes iniciar sesión.'
+                : 'Usuario registrado. El email está deshabilitado en este entorno, ya puedes iniciar sesión.');
+        res.status(201).json({
+            message,
+            emailDeliveryEnabled: verificationRequired,
+            requiresEmailVerification: verificationRequired
         });
-
-        const message = bootstrapRequested
-            ? 'Usuario registrado como administrador. Por favor verifica tu email.'
-            : 'Usuario registrado. Por favor verifica tu email.';
-        res.status(201).json({ message });
     } catch (err) {
         if (err.status) {
             return res.status(err.status).json({ error: err.message });
@@ -1013,6 +1082,10 @@ app.post('/api/auth/forgot-password', passwordResetLimiter, asyncHandler(async (
         return res.status(400).json({ error: 'Formato de email inválido' });
     }
 
+    if (!isEmailDeliveryEnabled()) {
+        return res.status(503).json({ error: 'La recuperación de contraseña por email no está disponible en este entorno' });
+    }
+
     try {
         const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
 
@@ -1118,6 +1191,14 @@ app.post('/api/auth/resend-verification', requireAuth, asyncHandler(async (req, 
 
         if (user.isVerified) {
             return res.status(400).json({ error: 'El email ya está verificado' });
+        }
+
+        if (!isEmailDeliveryEnabled()) {
+            db.prepare('UPDATE users SET isVerified = 1, verificationToken = NULL, verificationTokenExpires = NULL WHERE id = ?').run(user.id);
+            return res.json({
+                message: 'La verificación por email está deshabilitada en este entorno. Tu cuenta ha sido habilitada.',
+                autoVerified: true
+            });
         }
 
         // Generate new verification token (store hash, send plain token)
@@ -1265,7 +1346,7 @@ app.post('/api/upload/init', asyncHandler(async (req, res) => {
         if (!userRow) {
             return res.status(401).json({ error: 'No autenticado' });
         }
-        if (!userRow.isVerified && userRow.role !== 'admin') {
+        if (isEmailDeliveryEnabled() && !userRow.isVerified && userRow.role !== 'admin') {
             return res.status(403).json({ error: 'Verifica tu email para subir archivos' });
         }
     }
@@ -1405,8 +1486,100 @@ app.post('/api/upload/init', asyncHandler(async (req, res) => {
         VALUES (?, ?, ?, ?, ?, ?)
     `).run(uploadId, req.session.userId || null, ipFingerprint, 'initiated', now, now);
 
+    const uploadToken = createUploadSessionToken({
+        uploadId,
+        userId: req.session.userId || null,
+        ipFingerprint,
+    });
+
     metrics.increment('upload_init', 1);
-    res.json({ uploadId });
+    res.json({ uploadId, uploadToken });
+}));
+
+app.get('/api/upload/status/:uploadId', asyncHandler(async (req, res) => {
+    const { uploadId } = req.params;
+    metrics.increment('upload_resume_probe', 1);
+
+    if (!/^[a-f0-9-]{36}$/i.test(uploadId)) {
+        return res.status(400).json({ error: 'ID de subida inválido' });
+    }
+
+    const sessionRow = db.prepare(`
+        SELECT status, fileId, userId, ipFingerprint, bytesReceived, createdAt, updatedAt
+        FROM upload_sessions
+        WHERE uploadId = ?
+    `).get(uploadId);
+
+    if (!sessionRow) {
+        return res.status(404).json({ error: 'Sesión de subida no encontrada' });
+    }
+
+    const uploadToken = req.get('x-upload-token') || req.query.uploadToken;
+    if (!validateUploadSessionToken({
+        uploadId,
+        token: uploadToken,
+        userId: sessionRow.userId || null,
+        ipFingerprint: sessionRow.ipFingerprint || null,
+    })) {
+        return res.status(403).json({ error: 'No autorizado para esta sesión de subida' });
+    }
+
+    const uploadPath = path.join(CHUNKS_DIR, uploadId);
+
+    let meta = null;
+    try {
+        const metaContent = await fsPromises.readFile(path.join(uploadPath, 'meta.json'), 'utf8');
+        meta = JSON.parse(metaContent);
+    } catch (err) {
+        if (sessionRow.status !== 'completed') {
+            return res.status(404).json({ error: 'Metadatos de la sesión no disponibles' });
+        }
+    }
+
+    let completedChunks = [];
+    let uploadedBytes = 0;
+    if (meta) {
+        try {
+            const entries = await fsPromises.readdir(uploadPath);
+            for (const entry of entries) {
+                const match = entry.match(/^(\d+)\.part$/);
+                if (!match) continue;
+
+                const chunkIndex = parseInt(match[1], 10);
+                if (Number.isNaN(chunkIndex)) continue;
+
+                completedChunks.push(chunkIndex);
+
+                try {
+                    const stat = await fsPromises.stat(path.join(uploadPath, entry));
+                    uploadedBytes += stat.size;
+                } catch {
+                    // Ignore races with cleanup/resume
+                }
+            }
+            completedChunks.sort((a, b) => a - b);
+        } catch {
+            // Ignore listing races; rely on DB bytes below
+        }
+    }
+
+    if (completedChunks.length > 0) {
+        metrics.increment('upload_resume_available', 1);
+    }
+
+    res.json({
+        uploadId,
+        status: sessionRow.status,
+        fileId: sessionRow.fileId || null,
+        createdAt: sessionRow.createdAt,
+        updatedAt: sessionRow.updatedAt,
+        bytesReceived: uploadedBytes || sessionRow.bytesReceived || 0,
+        completedChunks,
+        totalChunks: meta?.totalChunks ?? null,
+        size: meta?.size ?? null,
+        originalName: meta?.originalName ?? null,
+        mimeType: meta?.mimeType ?? null,
+    });
 }));
 
 // NOTE: Chunk size validation is handled by the optimized chunkRouter
@@ -1744,6 +1917,40 @@ app.post('/api/upload/cancel', asyncHandler(async (req, res) => {
 
 
 // Download Routes
+const sendTrackedDownload = (req, res, file) => {
+    metrics.increment('download_start', 1);
+
+    res.download(file.serverPath, file.originalName, (err) => {
+        if (err) {
+            const isClientAbort = err.code === 'ECONNABORTED' || err.message?.includes('Request aborted');
+            if (isClientAbort) {
+                metrics.increment('download_abort', 1);
+                logger.warn('Download aborted by client', { fileId: file.id, error: err.message });
+                return;
+            }
+
+            metrics.increment('download_fail', 1);
+
+            if (err.code === 'ENOENT') {
+                logger.error('Download file missing on disk', { fileId: file.id, serverPath: file.serverPath });
+                if (!res.headersSent) {
+                    return res.status(404).json({ error: 'Archivo no disponible' });
+                }
+                return;
+            }
+
+            logger.error('Download failed', { fileId: file.id, error: err.message, code: err.code });
+            if (!res.headersSent) {
+                return res.status(500).json({ error: 'Error al descargar archivo' });
+            }
+            return;
+        }
+
+        db.prepare('UPDATE files SET downloadCount = downloadCount + 1 WHERE id = ?').run(file.id);
+        metrics.increment('download_complete', 1);
+    });
+};
+
 app.get('/api/meta/:id', (req, res) => {
     const { id } = req.params;
     const stmt = db.prepare('SELECT id, originalName, size, mimeType, createdAt, expiresAt, maxDownloads, downloadCount, userId, passwordHash FROM files WHERE id = ?');
@@ -1813,7 +2020,7 @@ app.post('/api/download/:id/validate', downloadValidateLimiter, async (req, res)
 
     res.cookie('sendu_download_token', token, {
         httpOnly: true,
-        secure: isProduction,
+        secure: requestUsesSecureCookies(req),
         sameSite: isProduction ? 'strict' : 'lax',
         maxAge: 5 * 60 * 1000,
         path: `/api/download/${id}`
@@ -1856,18 +2063,13 @@ app.get('/api/download/:id', async (req, res) => {
         }
     }
 
-    // Increment download count
-    const updateStmt = db.prepare('UPDATE files SET downloadCount = downloadCount + 1 WHERE id = ?');
-    updateStmt.run(id);
-    metrics.increment('download', 1);
-
     // Clear one-time download cookie
     res.clearCookie('sendu_download_token', {
         path: `/api/download/${id}`
     });
 
     // Send file with proper headers for download
-    res.download(file.serverPath, file.originalName);
+    sendTrackedDownload(req, res, file);
 });
 
 // Legacy POST download (kept for backwards compatibility)
@@ -1897,13 +2099,8 @@ app.post('/api/download/:id', downloadValidateLimiter, async (req, res) => {
         if (!match) return res.status(401).json({ error: 'Contraseña incorrecta' });
     }
 
-    // Increment download count
-    const updateStmt = db.prepare('UPDATE files SET downloadCount = downloadCount + 1 WHERE id = ?');
-    updateStmt.run(id);
-    metrics.increment('download', 1);
-
     // Send file
-    res.download(file.serverPath, file.originalName);
+    sendTrackedDownload(req, res, file);
 });
 
 // User Files Route (with pagination)
@@ -1920,7 +2117,7 @@ app.get('/api/user/files', requireAuth, (req, res) => {
 
     // Get paginated files
     const stmt = db.prepare('SELECT * FROM files WHERE userId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?');
-    const files = stmt.all(req.session.userId, limit, offset);
+    const files = stmt.all(req.session.userId, limit, offset).map(serializeFileForClient);
 
     res.json({
         files,
@@ -2125,6 +2322,10 @@ app.post('/api/admin/users/:id/send-verification', requireAdmin, asyncHandler(as
             return res.status(400).json({ error: 'El usuario ya está verificado' });
         }
 
+        if (!isEmailDeliveryEnabled()) {
+            return res.status(503).json({ error: 'La verificación por email no está disponible mientras SMTP no esté configurado' });
+        }
+
         // Generate new verification token (store hash, send plain token)
         const { token: verificationToken, hash: verificationTokenHash } = generateSecureToken();
         const verificationTokenExpires = Date.now() + (24 * 60 * 60 * 1000); // 24 hours
@@ -2166,6 +2367,10 @@ app.post('/api/admin/users/:id/send-reset', requireAdmin, asyncHandler(async (re
         const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
         if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
 
+        if (!isEmailDeliveryEnabled()) {
+            return res.status(503).json({ error: 'La recuperación por email no está disponible mientras SMTP no esté configurado' });
+        }
+
         // Generate reset token (store hash, send plain token)
         const { token: resetToken, hash: resetTokenHash } = generateSecureToken();
         const resetTokenExpires = Date.now() + (60 * 60 * 1000); // 1 hour
@@ -2197,7 +2402,9 @@ app.get('/api/admin/files', requireAdmin, (req, res) => {
     const { total } = db.prepare('SELECT COUNT(*) as total FROM files').get();
 
     // Get paginated files
-    const files = db.prepare('SELECT * FROM files ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(limit, offset);
+    const files = db.prepare('SELECT * FROM files ORDER BY createdAt DESC LIMIT ? OFFSET ?')
+        .all(limit, offset)
+        .map(serializeFileForClient);
 
     res.json({
         files,
@@ -2500,11 +2707,12 @@ app.post('/api/admin/smtp/test', requireAdmin, async (req, res) => {
     }
 
     try {
-        const config = getSmtpConfig();
-
-        if (!config.smtpHost || !config.smtpUser || !config.smtpPass) {
+        if (!isEmailDeliveryEnabled()) {
             return res.status(400).json({ error: 'Configuración SMTP incompleta. Guarda la configuración primero.' });
         }
+
+        const transporter = createSmtpTransporter();
+        await transporter.verify();
 
         const result = await sendEmail(
             email,
@@ -2537,7 +2745,10 @@ app.get('/api/settings/public', (req, res) => {
         logoDark: defaultBranding.logoDark,
         favicon: defaultBranding.favicon,
         dropzoneIcon: defaultBranding.dropzoneIcon,
-        footerText: ''
+        footerText: '',
+        emailDeliveryEnabled: isEmailDeliveryEnabled(),
+        requiresEmailVerification: isEmailDeliveryEnabled(),
+        passwordResetEnabled: isEmailDeliveryEnabled()
     };
 
     settings.forEach(s => settingsMap[s.key] = s.value);
@@ -2975,14 +3186,120 @@ app.post('/api/admin/jobs/:id/cancel', requireAdmin, asyncHandler(async (req, re
 // Admin endpoint for basic operational metrics
 app.get('/api/admin/metrics', requireAdmin, asyncHandler(async (req, res) => {
     let disk = null;
+    let uploadsWritable = false;
+    let dataWritable = false;
+    let dbOk = false;
     try {
         disk = await checkDiskSpace(UPLOAD_DIR);
     } catch { }
+    try {
+        db.prepare('SELECT 1').get();
+        dbOk = true;
+    } catch { }
+    try {
+        await fsPromises.access(UPLOAD_DIR, fs.constants.W_OK);
+        uploadsWritable = true;
+    } catch { }
+    try {
+        await fsPromises.access(dataDir, fs.constants.W_OK);
+        dataWritable = true;
+    } catch { }
     const queue = getQueueStats();
+    const snapshot = metrics.getSnapshot();
+    const counters = snapshot.counters || {};
+    const totalUploadsStarted = counters.upload_init || 0;
+    const totalUploadsCompleted = counters.upload_complete || 0;
+    const totalUploadsCancelled = counters.upload_cancel || 0;
+    const totalDownloadsStarted = counters.download_start || 0;
+    const totalDownloadsCompleted = counters.download_complete || 0;
+    const totalDownloadsFailed = (counters.download_fail || 0) + (counters.download_abort || 0);
+    const totalHttpRequests = (counters.http_2xx || 0) + (counters.http_4xx || 0) + (counters.http_5xx || 0);
+    const activeUploads = db.prepare(`
+        SELECT COUNT(*) as total
+        FROM upload_sessions
+        WHERE status IN ('initiated', 'processing')
+    `).get()?.total || 0;
+    const staleUploads = db.prepare(`
+        SELECT COUNT(*) as total
+        FROM upload_sessions
+        WHERE status IN ('initiated', 'processing') AND updatedAt < ?
+    `).get(Date.now() - (15 * 60 * 1000))?.total || 0;
+    const diskFreePercent = disk?.size ? (disk.free / disk.size) : null;
+    const alerts = [];
+
+    if (!dbOk || !uploadsWritable || !dataWritable) {
+        alerts.push({
+            code: 'readiness_degraded',
+            severity: 'high',
+            message: 'Alguna dependencia critica no esta lista para escribir en produccion.'
+        });
+    }
+    if (typeof diskFreePercent === 'number' && diskFreePercent < 0.15) {
+        alerts.push({
+            code: 'disk_low',
+            severity: diskFreePercent < 0.08 ? 'high' : 'medium',
+            message: `Espacio libre bajo en uploads (${Math.round(diskFreePercent * 100)}%).`
+        });
+    }
+    if ((queue.byStatus?.dead || 0) > 0) {
+        alerts.push({
+            code: 'jobs_dead',
+            severity: 'high',
+            message: `Hay ${queue.byStatus.dead} jobs en dead-letter queue.`
+        });
+    }
+    if ((counters.http_5xx || 0) > 0) {
+        alerts.push({
+            code: 'http_5xx_seen',
+            severity: 'medium',
+            message: `Se registraron ${counters.http_5xx} respuestas 5xx desde el ultimo arranque.`
+        });
+    }
+    if (staleUploads > 0) {
+        alerts.push({
+            code: 'stale_uploads',
+            severity: 'medium',
+            message: `Hay ${staleUploads} subidas activas sin actividad reciente.`
+        });
+    }
+
     res.json({
-        metrics: metrics.getSnapshot(),
+        metrics: snapshot,
         queue,
-        disk
+        disk,
+        health: {
+            status: dbOk && uploadsWritable && dataWritable ? 'ok' : 'degraded',
+            db: dbOk,
+            uploads: uploadsWritable,
+            data: dataWritable
+        },
+        alerts,
+        summary: {
+            uploads: {
+                started: totalUploadsStarted,
+                completed: totalUploadsCompleted,
+                cancelled: totalUploadsCancelled,
+                inProgressEstimate: Math.max(0, totalUploadsStarted - totalUploadsCompleted - totalUploadsCancelled),
+                activeSessions: activeUploads,
+                staleSessions: staleUploads
+            },
+            downloads: {
+                started: totalDownloadsStarted,
+                completed: totalDownloadsCompleted,
+                failedOrAborted: totalDownloadsFailed
+            },
+            http: {
+                totalRequests: totalHttpRequests,
+                ok: counters.http_2xx || 0,
+                clientErrors: counters.http_4xx || 0,
+                serverErrors: counters.http_5xx || 0
+            },
+            storage: {
+                freeBytes: disk?.free || null,
+                sizeBytes: disk?.size || null,
+                freePercent: diskFreePercent
+            }
+        }
     });
 }));
 

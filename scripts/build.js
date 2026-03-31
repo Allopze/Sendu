@@ -67,15 +67,30 @@ fs.mkdirSync(backendDir, { recursive: true });
 
 // Copy backend folder (excluding tests)
 const backendSrc = path.join(rootDir, 'backend');
+const shouldSkipBackendCopy = (src) => {
+    const baseName = path.basename(src);
+    if (['tests', 'logs'].includes(baseName)) {
+        return true;
+    }
+
+    return (
+        baseName.endsWith('.sqlite')
+        || baseName.endsWith('.sqlite-shm')
+        || baseName.endsWith('.sqlite-wal')
+        || baseName.endsWith('.db')
+    );
+};
+
 const copyBackendFile = (src, dest) => {
     const stat = fs.statSync(src);
     if (stat.isDirectory()) {
-        if (path.basename(src) === 'tests' || path.basename(src) === 'logs') return; // Skip tests and logs
+        if (shouldSkipBackendCopy(src)) return; // Skip tests, logs, and local database artifacts
         fs.mkdirSync(dest, { recursive: true });
         for (const file of fs.readdirSync(src)) {
             copyBackendFile(path.join(src, file), path.join(dest, file));
         }
     } else {
+        if (shouldSkipBackendCopy(src)) return;
         fs.copyFileSync(src, dest);
     }
 };

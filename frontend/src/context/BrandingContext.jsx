@@ -33,7 +33,10 @@ const defaultSettings = {
     logoDark: '',
     favicon: '',
     dropzoneIcon: '',
-    footerText: ''
+    footerText: '',
+    emailDeliveryEnabled: true,
+    requiresEmailVerification: true,
+    passwordResetEnabled: true
 };
 
 export const BrandingProvider = ({ children }) => {

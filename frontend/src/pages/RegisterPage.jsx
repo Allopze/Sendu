@@ -3,6 +3,8 @@ import { useNavigate, Link } from 'react-router-dom';
 import useAuth from '../hooks/useAuth';
 import { useToast } from '../context/ToastContext';
 import { useTheme } from '../context/ThemeContext';
+import { useBranding } from '../context/BrandingContext';
+import useUploadLimits from '../hooks/useUploadLimits';
 import { UserPlus } from 'lucide-react';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
@@ -18,6 +20,10 @@ const RegisterPage = () => {
     const navigate = useNavigate();
     const toast = useToast();
     const { isDark } = useTheme();
+    const { settings } = useBranding();
+    const limits = useUploadLimits();
+    const emailVerificationRequired = settings.requiresEmailVerification !== false;
+    const registeredLimit = limits.maxFileSize || 100;
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -33,7 +39,7 @@ const RegisterPage = () => {
         setLoading(false);
         
         if (res.success) {
-            toast.success('¡Cuenta creada! Revisa tu email para verificar tu cuenta');
+            toast.success(res.message || 'Cuenta creada correctamente');
             navigate('/login');
         } else {
             if (res.error?.includes('already') || res.error?.includes('existe') || res.error?.includes('registered')) {
@@ -59,7 +65,9 @@ const RegisterPage = () => {
                     Crear Cuenta
                 </h2>
                 <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>
-                    Sube archivos de hasta 50GB.
+                    {emailVerificationRequired
+                        ? `Crea una cuenta para subir hasta ${registeredLimit}MB por archivo y verificar tu email.`
+                        : `Crea una cuenta para subir hasta ${registeredLimit}MB por archivo. En este entorno no se requiere verificación por email.`}
                 </p>
             </div>
 
@@ -68,25 +76,32 @@ const RegisterPage = () => {
                 <Input
                     label="Email"
                     type="email"
-                    placeholder="usuario@ejemplo.com"
+                    placeholder="usuario@ejemplo.com…"
                     value={formData.email}
                     onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                    name="email"
+                    autoComplete="email"
+                    spellCheck={false}
                     required
                     disabled={loading}
                 />
                 <Input
                     label="Usuario"
                     type="text"
-                    placeholder="tunombre"
+                    placeholder="tunombre…"
                     value={formData.username}
                     onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                    name="username"
+                    autoComplete="username"
+                    spellCheck={false}
                     required
                     disabled={loading}
                 />
                 <Input
                     label="Contraseña"
                     type="password"
-                    placeholder=""
+                    name="password"
+                    autoComplete="new-password"
                     value={formData.password}
                     onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                     required
@@ -98,7 +113,7 @@ const RegisterPage = () => {
                     className="w-full"
                     loading={loading}
                 >
-                    {loading ? 'Creando cuenta...' : 'Registrarse'}
+                    {loading ? 'Creando cuenta…' : 'Registrarse'}
                 </Button>
             </form>
 

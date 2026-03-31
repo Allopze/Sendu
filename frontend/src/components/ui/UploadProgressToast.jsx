@@ -59,6 +59,13 @@ const UploadProgressToast = () => {
         navigate(uploadOriginPath || '/');
     };
 
+    const handleKeyDown = (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            handleClick();
+        }
+    };
+
     const handleCancel = (e) => {
         e.stopPropagation();
         cancelUpload();
@@ -70,6 +77,12 @@ const UploadProgressToast = () => {
         <div 
             className="fixed top-4 left-1/2 -translate-x-1/2 z-50 animate-fade-in cursor-pointer"
             onClick={handleClick}
+            onKeyDown={handleKeyDown}
+            role="button"
+            tabIndex={0}
+            aria-label="Volver a la pantalla de subida"
+            aria-live="polite"
+            aria-atomic="true"
         >
             <div className="flex flex-col gap-2 px-4 py-3 rounded-2xl shadow-2xl border backdrop-blur-md bg-white/95 dark:bg-gray-800/95 border-primary-200 dark:border-primary-900/50 min-w-[280px] max-w-sm hover:shadow-xl transition-shadow">
                 {/* Header */}
@@ -93,6 +106,7 @@ const UploadProgressToast = () => {
                         onClick={handleCancel}
                         className="p-1 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors text-gray-500"
                         title="Cancelar subida"
+                        aria-label="Cancelar subida"
                     >
                         <X size={16} />
                     </button>

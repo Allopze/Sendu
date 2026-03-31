@@ -84,10 +84,21 @@ const DashboardPage = () => {
     };
 
     const confirmDelete = async () => {
-        await apiClient.deleteFile(deleteModal.fileId);
-        setDeleteModal({ isOpen: false, fileId: null, fileName: '' });
-        toast.success('Archivo eliminado');
-        fetchData();
+        try {
+            const res = await apiClient.deleteFile(deleteModal.fileId);
+            const data = await res.json().catch(() => ({}));
+
+            if (!res.ok) {
+                throw new Error(data.error || 'No se pudo eliminar el archivo');
+            }
+
+            toast.success('Archivo eliminado');
+            fetchData();
+        } catch (err) {
+            toast.error(err.message || 'No se pudo eliminar el archivo');
+        } finally {
+            setDeleteModal({ isOpen: false, fileId: null, fileName: '' });
+        }
     };
 
     const handleCopy = (fileId) => {
@@ -248,7 +259,7 @@ const DashboardPage = () => {
                                         </span>
                                         
                                         {/* Password protected */}
-                                        {file.password && (
+                                        {file.hasPassword && (
                                             <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg ${isDark ? 'bg-purple-500/20 text-purple-400' : 'bg-purple-100 text-purple-600'}`}>
                                                 <Lock size={12} />
                                                 Protegido

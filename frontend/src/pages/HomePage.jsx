@@ -1,16 +1,15 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { RefreshCw, AlertCircle, Clock, Lock, Eye, EyeOff, X, Upload, Check, Copy, ExternalLink, Plus, FolderOpen, Loader2, File as FileIcon, Folder, Trash2, Archive, Image, FileText, FileVideo, FileAudio, FileCode, FileArchive, FileSpreadsheet, Presentation, FileJson, FilePlus, FolderPlus } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
 import { useBranding } from '../context/BrandingContext';
 import { useUploadContext } from '../context/UploadContext';
 import useAuth from '../hooks/useAuth';
-import apiClient from '../api/client';
+import useUploadLimits from '../hooks/useUploadLimits';
 import Button from '../components/ui/Button';
 import BoxIcon from '../components/ui/BoxIcon';
 import FileItem from '../components/ui/FileItem';
 import InfoModal from '../components/ui/InfoModal';
-import JSZip from 'jszip';
 
 // Límite máximo de archivos que se pueden seleccionar
 const MAX_FILES_LIMIT = 1000;
@@ -26,13 +25,14 @@ const HomePage = () => {
     const [isDragging, setIsDragging] = useState(false);
     const [usePassword, setUsePassword] = useState(false);
     const [showPassword, setShowPassword] = useState(false);
-    const [limits, setLimits] = useState({ maxFileSize: 100, effectiveMaxFileSize: 100, isLoggedIn: false });
     const [copied, setCopied] = useState(false);
     const [isZipping, setIsZipping] = useState(false);
     const [zipProgress, setZipProgress] = useState(0);
     const [showFileLimitModal, setShowFileLimitModal] = useState(false);
     const fileInputRef = useRef(null);
     const folderInputRef = useRef(null);
+    const zipWorkerRef = useRef(null);
+    const limits = useUploadLimits();
     
     const { 
         progress, 
@@ -42,6 +42,7 @@ const HomePage = () => {
         uploadSpeed, 
         eta, 
         currentFile,
+        currentOptions,
         uploadFile, 
         cancelUpload, 
         resetUpload 
@@ -49,17 +50,27 @@ const HomePage = () => {
 
     // Sincronizar archivo con el contexto global cuando hay una subida activa
     useEffect(() => {
-        if (currentFile && status === 'uploading' && !file) {
+        if (currentFile && (status === 'uploading' || status === 'preparing') && !file) {
             setFile(currentFile);
         }
     }, [currentFile, status, file]);
 
     useEffect(() => {
-        apiClient.getUploadLimits()
-            .then(res => res.json())
-            .then(data => setLimits(data))
-            .catch(err => console.error('Error loading limits:', err));
+        return () => {
+            zipWorkerRef.current?.terminate();
+            zipWorkerRef.current = null;
+        };
     }, []);
+
+    useEffect(() => {
+        if (status !== 'idle' && currentOptions) {
+            setOptions({
+                expires: currentOptions.expires || '7',
+                password: currentOptions.password || ''
+            });
+            setUsePassword(Boolean(currentOptions.password));
+        }
+    }, [currentOptions, status]);
 
     const formatMaxSize = (mb) => {
         if (mb >= 1024) {
@@ -123,6 +134,13 @@ const HomePage = () => {
     const handleDragLeave = (e) => {
         e.preventDefault();
         setIsDragging(false);
+    };
+
+    const handleDropZoneKeyDown = (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            fileInputRef.current?.click();
+        }
     };
 
     // Función recursiva para obtener archivos de un directorio (DataTransferItem)
@@ -244,43 +262,59 @@ const HomePage = () => {
         setUsePassword(false);
     };
 
-    // Crear ZIP de múltiples archivos
-    const createZipFromFiles = async (files) => {
-        const zip = new JSZip();
-        
-        for (let i = 0; i < files.length; i++) {
-            const { file, path } = files[i];
-            zip.file(path, file);
-            setZipProgress(Math.round(((i + 1) / files.length) * 50)); // Primera mitad del progreso
+    const createZipFromFiles = useCallback(async (files) => {
+        if (typeof Worker === 'undefined') {
+            throw new Error('Tu navegador no soporta workers para comprimir archivos grandes');
         }
-        
-        const blob = await zip.generateAsync({ 
-            type: 'blob',
-            compression: 'DEFLATE',
-            compressionOptions: { level: 6 }
-        }, (metadata) => {
-            setZipProgress(50 + Math.round(metadata.percent / 2)); // Segunda mitad del progreso
-        });
-        
-        // Determinar nombre del ZIP
-        let zipName = 'archivos.zip';
-        if (files.length === 1) {
-            // Si es un solo archivo, usar su nombre
-            zipName = files[0].file.name;
-        } else {
-            // Si hay carpeta raíz común, usar ese nombre
-            const paths = files.map(f => f.path);
-            const firstPath = paths[0];
-            if (firstPath.includes('/')) {
-                const rootFolder = firstPath.split('/')[0];
-                if (paths.every(p => p.startsWith(rootFolder + '/'))) {
-                    zipName = rootFolder + '.zip';
+
+        const workerFiles = await Promise.all(files.map(async ({ file, path }) => ({
+            path,
+            name: file.name,
+            type: file.type,
+            lastModified: file.lastModified,
+            buffer: await file.arrayBuffer()
+        })));
+
+        return new Promise((resolve, reject) => {
+            zipWorkerRef.current?.terminate();
+
+            const worker = new Worker(new URL('../workers/zipWorker.js', import.meta.url), { type: 'module' });
+            zipWorkerRef.current = worker;
+
+            worker.onmessage = (event) => {
+                const { type, progress: nextProgress, zipName, buffer, error: workerError } = event.data || {};
+
+                if (type === 'progress') {
+                    setZipProgress(nextProgress || 0);
+                    return;
                 }
-            }
-        }
-        
-        return new File([blob], zipName, { type: 'application/zip' });
-    };
+
+                if (type === 'complete') {
+                    zipWorkerRef.current = null;
+                    worker.terminate();
+                    resolve(new File([buffer], zipName || 'archivos.zip', { type: 'application/zip' }));
+                    return;
+                }
+
+                if (type === 'error') {
+                    zipWorkerRef.current = null;
+                    worker.terminate();
+                    reject(new Error(workerError || 'No se pudo comprimir la selección'));
+                }
+            };
+
+            worker.onerror = (event) => {
+                zipWorkerRef.current = null;
+                worker.terminate();
+                reject(new Error(event.message || 'No se pudo iniciar la compresión en background'));
+            };
+
+            worker.postMessage(
+                { files: workerFiles },
+                workerFiles.map((item) => item.buffer).filter(Boolean)
+            );
+        });
+    }, []);
 
     const handleStartUpload = async () => {
         if (pendingFiles.length === 0) return;
@@ -329,6 +363,10 @@ const HomePage = () => {
     };
 
     const maxLimit = formatMaxSize(limits.effectiveMaxFileSize || 100);
+    const registeredLimit = formatMaxSize(limits.maxFileSize || 100);
+    const guestRemaining = typeof limits.guestRemaining === 'number'
+        ? formatSize(limits.guestRemaining)
+        : null;
 
     // Componente para renderizar el icono de dropzone (customizado o null si no hay)
     const DropzoneIcon = ({ size = 100, className = '' }) => {
@@ -430,6 +468,11 @@ const HomePage = () => {
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
                 onClick={() => pendingFiles.length === 0 && fileInputRef.current?.click()}
+                onKeyDown={handleDropZoneKeyDown}
+                role="button"
+                tabIndex={0}
+                aria-label={pendingFiles.length === 0 ? 'Seleccionar archivos o carpetas para transferir' : 'Agregar más archivos o carpetas'}
+                aria-describedby={pendingFiles.length === 0 ? 'upload-dropzone-help' : undefined}
             >
                 {pendingFiles.length === 0 ? (
                     // Drop Zone vacío
@@ -447,14 +490,27 @@ const HomePage = () => {
                                 <p className={`text-sm ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
                                     Soporte hasta <span className={`font-bold ${isDark ? 'text-white' : 'text-zinc-700'}`}>{maxLimit}</span>.
                                 </p>
+                                <p id="upload-dropzone-help" className="sr-only">
+                                    Presiona Enter o espacio para abrir el selector de archivos, o arrastra archivos y carpetas a esta zona.
+                                </p>
                                 {!user && (
-                                    <Link 
-                                        to="/register"
-                                        onClick={(e) => e.stopPropagation()}
-                                        className="text-xs text-red-500 hover:underline mt-1 inline-block"
-                                    >
-                                        Regístrate para subir más
-                                    </Link>
+                                    <>
+                                        <p className={`text-xs mt-1 ${isDark ? 'text-zinc-600' : 'text-zinc-500'}`}>
+                                            Cuenta registrada: hasta <span className={`font-semibold ${isDark ? 'text-zinc-300' : 'text-zinc-700'}`}>{registeredLimit}</span> por archivo.
+                                        </p>
+                                        {guestRemaining && (
+                                            <p className={`text-xs mt-1 ${isDark ? 'text-zinc-600' : 'text-zinc-500'}`}>
+                                                Cupo invitado restante aproximado: <span className={`font-semibold ${isDark ? 'text-zinc-300' : 'text-zinc-700'}`}>{guestRemaining}</span>.
+                                            </p>
+                                        )}
+                                        <Link 
+                                            to="/register"
+                                            onClick={(e) => e.stopPropagation()}
+                                            className="text-xs text-red-500 hover:underline mt-1 inline-block"
+                                        >
+                                            Regístrate para subir más
+                                        </Link>
+                                    </>
                                 )}
                             </div>
                         </div>
@@ -513,6 +569,7 @@ const HomePage = () => {
                                         ? 'border-blue-500/50 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 hover:border-blue-400' 
                                         : 'border-blue-400 bg-blue-50 text-blue-600 hover:bg-blue-100'
                                 }`}
+                                aria-label="Agregar archivos"
                             >
                                 <FilePlus size={14} />
                                 Archivos
@@ -524,6 +581,7 @@ const HomePage = () => {
                                         ? 'border-yellow-500/50 bg-yellow-500/10 text-yellow-400 hover:bg-yellow-500/20 hover:border-yellow-400' 
                                         : 'border-yellow-500 bg-yellow-50 text-yellow-600 hover:bg-yellow-100'
                                 }`}
+                                aria-label="Agregar carpeta"
                             >
                                 <FolderPlus size={14} />
                                 Carpeta
@@ -536,6 +594,7 @@ const HomePage = () => {
                                         ? 'border-red-500/50 bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:border-red-400' 
                                         : 'border-red-400 bg-red-50 text-red-600 hover:bg-red-100'
                                 }`}
+                                aria-label="Limpiar selección"
                             >
                                 <Trash2 size={14} />
                                 Limpiar
@@ -563,6 +622,7 @@ const HomePage = () => {
                                         <button
                                             onClick={() => handleRemoveFile(index)}
                                             className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-500/20 text-red-400 transition-all"
+                                            aria-label={`Quitar ${item.path}`}
                                         >
                                             <X size={14} />
                                         </button>
@@ -620,6 +680,7 @@ const HomePage = () => {
                                             type="button"
                                             onClick={() => setShowPassword(!showPassword)}
                                             className="p-1.5 text-zinc-400 hover:text-zinc-600"
+                                            aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
                                         >
                                             {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                                         </button>
@@ -629,6 +690,7 @@ const HomePage = () => {
                                         onClick={generatePassword}
                                         className="p-1.5 text-zinc-400 hover:text-zinc-600"
                                         title="Generar contraseña"
+                                        aria-label="Generar contraseña"
                                     >
                                         <RefreshCw size={16} />
                                     </button>
@@ -649,7 +711,7 @@ const HomePage = () => {
                     {isZipping ? (
                         <>
                             <Loader2 size={18} className="animate-spin mr-2" />
-                            Comprimiendo... {zipProgress}%
+                            Comprimiendo… {zipProgress}%
                         </>
                     ) : (
                         `Transferir ${pendingFiles.length > 0 ? (pendingFiles.length === 1 ? 'Archivo' : `${pendingFiles.length} Archivos`) : 'Archivos'}`
@@ -733,6 +795,7 @@ const HomePage = () => {
                 <button 
                     onClick={handleCancel}
                     className="w-full py-3 rounded-xl font-medium transition-all flex items-center justify-center gap-2 bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300"
+                    aria-label="Cancelar subida"
                 >
                     <X size={18} />
                     Cancelar
@@ -786,7 +849,7 @@ const HomePage = () => {
                         ¡Listo!
                     </h2>
                     <p className={`text-center mb-4 ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>
-                        Tu archivo ha sido encriptado y está listo para compartir.
+                        Tu archivo está listo para compartir.
                     </p>
                     
                     {/* Info del archivo */}
@@ -819,6 +882,7 @@ const HomePage = () => {
                         className={`px-6 py-3 rounded-lg font-medium transition-all flex items-center gap-2 flex-shrink-0 ${
                             copied ? 'bg-green-500 text-white' : 'bg-red-600 hover:bg-red-500 text-white'
                         }`}
+                        aria-label={copied ? 'Enlace copiado' : 'Copiar enlace compartido'}
                     >
                         {copied ? <Check size={18} /> : <Copy size={18} />}
                         {copied ? 'Copiado' : 'Copiar'}
@@ -890,7 +954,7 @@ const HomePage = () => {
                 </div>
                 
                 <h2 className={`text-2xl font-bold mb-2 ${isDark ? 'text-white' : 'text-zinc-800'}`}>
-                    Comprimiendo archivos...
+                    Comprimiendo archivos…
                 </h2>
                 
                 <p className={`text-sm mb-6 text-center ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>

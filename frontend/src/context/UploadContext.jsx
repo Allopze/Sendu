@@ -1,6 +1,7 @@
 /* eslint-disable react-refresh/only-export-components */
-import { createContext, useContext, useState, useRef, useEffect, useCallback } from 'react';
+import { createContext, useContext, useState, useRef, useEffect, useCallback, startTransition } from 'react';
 import apiClient, { UPLOAD_API_BASE } from '../api/client';
+import { savePersistedUpload, getPersistedUpload, deletePersistedUpload } from '../lib/uploadPersistence';
 
 const UploadContext = createContext(null);
 
@@ -36,6 +37,27 @@ const clearUploadState = (uploadId) => {
     } catch {
         // Ignore
     }
+};
+
+const getAllUploadStates = () => {
+    const states = [];
+
+    try {
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (!key?.startsWith(UPLOAD_STATE_PREFIX)) continue;
+
+            const uploadId = key.replace(UPLOAD_STATE_PREFIX, '');
+            const state = getUploadState(uploadId);
+            if (state) {
+                states.push({ uploadId, ...state });
+            }
+        }
+    } catch {
+        return [];
+    }
+
+    return states.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 };
 
 // Limpiar estados de upload antiguos (más de 24 horas)
@@ -97,6 +119,12 @@ const getConnectionInfo = () => {
         effectiveType: nav.effectiveType || null,
         rtt: typeof nav.rtt === 'number' ? nav.rtt : null
     };
+};
+
+const getChunkByteLength = (chunkIndex, totalSize, chunkSizeBytes) => {
+    const start = chunkIndex * chunkSizeBytes;
+    const end = Math.min(start + chunkSizeBytes, totalSize);
+    return Math.max(0, end - start);
 };
 
 // Elegir chunk size considerando tamaño de archivo, límites y conexión
@@ -207,12 +235,15 @@ export const UploadProvider = ({ children }) => {
     const [eta, setEta] = useState(null);
     const [currentFile, setCurrentFile] = useState(null);
     const [uploadOriginPath, setUploadOriginPath] = useState('/');
+    const [currentOptions, setCurrentOptions] = useState({ expires: '7', password: '' });
     
     const abortControllerRef = useRef(null);
     const uploadIdRef = useRef(null);
+    const uploadTokenRef = useRef(null);
     const speedSamplesRef = useRef([]);
     const lastProgressUpdateRef = useRef({ time: Date.now(), bytes: 0 });
     const lastProgressSetRef = useRef(0);
+    const resumeAttemptedRef = useRef(false);
 
     // Inicializar y precargar límites
     useEffect(() => {
@@ -220,7 +251,7 @@ export const UploadProvider = ({ children }) => {
         preloadLimits();
     }, []);
 
-    // Clean up on page unload/refresh
+    // Warn on page unload while an upload is active. We do not cancel here so refresh/crash can resume.
     useEffect(() => {
         const handleBeforeUnload = (e) => {
             if (uploadIdRef.current && status === 'uploading') {
@@ -232,7 +263,9 @@ export const UploadProvider = ({ children }) => {
         };
 
         window.addEventListener('beforeunload', handleBeforeUnload);
-        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+        return () => {
+            window.removeEventListener('beforeunload', handleBeforeUnload);
+        };
     }, [status]);
 
     // Calcular velocidad de subida y ETA
@@ -290,20 +323,33 @@ export const UploadProvider = ({ children }) => {
         }
     }, []);
 
+    const clearPersistedUpload = useCallback(async (uploadId) => {
+        if (!uploadId) return;
+        clearUploadState(uploadId);
+        await deletePersistedUpload(uploadId);
+    }, []);
+
+    const persistUploadArtifacts = useCallback(async (uploadId, file, state) => {
+        saveUploadState(uploadId, state);
+        await savePersistedUpload({ uploadId, file, state });
+    }, []);
+
     const cancelUpload = useCallback(async () => {
         if (abortControllerRef.current) {
             abortControllerRef.current.abort();
             abortControllerRef.current = null;
         }
-        if (uploadIdRef.current) {
+        const activeUploadId = uploadIdRef.current;
+        if (activeUploadId) {
             try {
-                await apiClient.cancelUpload(uploadIdRef.current);
-                clearUploadState(uploadIdRef.current);
+                await apiClient.cancelUpload(activeUploadId);
             } catch {
                 // Ignore errors during cleanup
             }
-            uploadIdRef.current = null;
+            await clearPersistedUpload(activeUploadId);
         }
+        uploadIdRef.current = null;
+        uploadTokenRef.current = null;
         setStatus('idle');
         setProgress(0);
         setError(null);
@@ -311,8 +357,9 @@ export const UploadProvider = ({ children }) => {
         setUploadSpeed(0);
         setEta(null);
         setCurrentFile(null);
+        setCurrentOptions({ expires: '7', password: '' });
         speedSamplesRef.current = [];
-    }, []);
+    }, [clearPersistedUpload]);
 
     const resetUpload = useCallback(() => {
         setStatus('idle');
@@ -322,11 +369,13 @@ export const UploadProvider = ({ children }) => {
         setUploadSpeed(0);
         setEta(null);
         setCurrentFile(null);
+        setCurrentOptions({ expires: '7', password: '' });
+        uploadTokenRef.current = null;
         speedSamplesRef.current = [];
     }, []);
 
     // Upload de chunk individual con progreso granular usando XMLHttpRequest
-    const uploadChunkWithProgress = useCallback((uploadId, chunkIndex, chunk, chunkTimeoutMs, signal, onProgress) => {
+    const uploadChunkWithProgress = useCallback((uploadId, uploadToken, chunkIndex, chunk, chunkTimeoutMs, signal, onProgress) => {
         return new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
             
@@ -373,6 +422,9 @@ export const UploadProvider = ({ children }) => {
             formData.append('chunk', chunk);
             
             xhr.open('POST', `${UPLOAD_API_BASE}/upload/chunk?uploadId=${uploadId}&index=${chunkIndex}`);
+            if (uploadToken) {
+                xhr.setRequestHeader('x-upload-token', uploadToken);
+            }
             xhr.withCredentials = true;
             xhr.send(formData);
         });
@@ -399,7 +451,7 @@ export const UploadProvider = ({ children }) => {
     };
 
     // Wrapper con reintentos automáticos
-    const uploadChunkWithRetry = useCallback(async (uploadId, chunkIndex, chunk, chunkTimeoutMs, signal, onProgress) => {
+    const uploadChunkWithRetry = useCallback(async (uploadId, uploadToken, chunkIndex, chunk, chunkTimeoutMs, signal, onProgress) => {
         let lastError;
         
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -408,7 +460,7 @@ export const UploadProvider = ({ children }) => {
                     throw new Error('Subida cancelada');
                 }
                 
-                return await uploadChunkWithProgress(uploadId, chunkIndex, chunk, chunkTimeoutMs, signal, onProgress);
+                return await uploadChunkWithProgress(uploadId, uploadToken, chunkIndex, chunk, chunkTimeoutMs, signal, onProgress);
             } catch (error) {
                 lastError = error;
                 
@@ -428,14 +480,34 @@ export const UploadProvider = ({ children }) => {
         throw new Error(`Error al subir fragmento ${chunkIndex + 1}: ${userMessage}`);
     }, [uploadChunkWithProgress]);
 
-    const uploadFile = useCallback(async (file, options = {}, originPath = '/') => {
+    const runWithConcurrency = useCallback(async (items, fn, limit) => {
+        const results = [];
+        const executing = new Set();
+
+        for (const item of items) {
+            const promise = fn(item).then(() => {
+                executing.delete(promise);
+            });
+            executing.add(promise);
+            results.push(promise);
+
+            if (executing.size >= limit) {
+                await Promise.race(executing);
+            }
+        }
+
+        return Promise.all(results);
+    }, []);
+
+    const runUploadSession = useCallback(async (file, options = {}, originPath = '/', resumeState = null) => {
         setStatus('uploading');
-        setProgress(0);
         setError(null);
+        setResult(null);
         setUploadSpeed(0);
         setEta(null);
         setCurrentFile(file);
-        setUploadOriginPath(originPath);
+        setUploadOriginPath(resumeState?.originPath || originPath);
+        setCurrentOptions(resumeState?.options || options);
         speedSamplesRef.current = [];
         lastProgressUpdateRef.current = { time: Date.now(), bytes: 0 };
         lastProgressSetRef.current = 0;
@@ -446,9 +518,9 @@ export const UploadProvider = ({ children }) => {
             const connectionInfo = getConnectionInfo();
             
             const fileSizeMB = file.size / (1024 * 1024);
-            const chunkSizeMB = calculateChunkSizeMB(fileSizeMB, limits, connectionInfo);
+            const chunkSize = resumeState?.chunkSize || (calculateChunkSizeMB(fileSizeMB, limits, connectionInfo) * 1024 * 1024);
+            const chunkSizeMB = chunkSize / (1024 * 1024);
             const chunkTimeoutMs = getChunkTimeoutMs(chunkSizeMB);
-            const chunkSize = chunkSizeMB * 1024 * 1024;
             const maxConcurrentUploads = calculateConcurrency(limits, connectionInfo);
             const maxFileSizeLimit = limits.effectiveMaxFileSize || limits.maxFileSize || DEFAULT_LIMITS.effectiveMaxFileSize;
             const maxFileSizeBytes = maxFileSizeLimit * 1024 * 1024;
@@ -460,34 +532,61 @@ export const UploadProvider = ({ children }) => {
                 throw new Error(message);
             }
 
-            const totalChunks = Math.ceil(file.size / chunkSize);
+            const totalChunks = resumeState?.totalChunks || Math.ceil(file.size / chunkSize);
+            let uploadId = resumeState?.uploadId || null;
+            let uploadToken = resumeState?.uploadToken || null;
+            let initialCompletedChunks = Array.isArray(resumeState?.completedChunks) ? resumeState.completedChunks : [];
 
-            const initRes = await apiClient.initUpload({
-                originalName: file.name,
-                size: file.size,
-                mimeType: file.type,
-                totalChunks,
-                ...options
-            });
+            if (!uploadId) {
+                const initRes = await apiClient.initUpload({
+                    originalName: file.name,
+                    size: file.size,
+                    mimeType: file.type,
+                    totalChunks,
+                    ...options
+                });
 
-            if (!initRes.ok) {
-                const errData = await initRes.json();
-                throw new Error(errData.error || 'Error al iniciar la subida');
+                if (!initRes.ok) {
+                    const errData = await initRes.json();
+                    throw new Error(errData.error || 'Error al iniciar la subida');
+                }
+
+                const initData = await initRes.json();
+                uploadId = initData.uploadId;
+                uploadToken = initData.uploadToken || null;
             }
-            const { uploadId } = await initRes.json();
             uploadIdRef.current = uploadId;
-            
-            saveUploadState(uploadId, {
+            uploadTokenRef.current = uploadToken;
+
+            const baseUploadState = {
                 fileName: file.name,
                 fileSize: file.size,
+                fileType: file.type,
+                lastModified: file.lastModified || Date.now(),
                 totalChunks,
-                completedChunks: [],
+                chunkSize,
+                uploadToken,
+                completedChunks: initialCompletedChunks,
+                options,
+                originPath,
                 timestamp: Date.now()
-            });
+            };
+            await persistUploadArtifacts(uploadId, file, baseUploadState);
 
-            const completedChunks = new Set();
-            let completedBytes = 0;
+            const completedChunks = new Set(initialCompletedChunks.filter((chunkIndex) => (
+                Number.isInteger(chunkIndex) && chunkIndex >= 0 && chunkIndex < totalChunks
+            )));
+            let completedBytes = Array.from(completedChunks).reduce(
+                (sum, chunkIndex) => sum + getChunkByteLength(chunkIndex, file.size, chunkSize),
+                0
+            );
             const inProgressBytes = new Map();
+
+            if (completedBytes > 0) {
+                updateProgress(Math.round((completedBytes / file.size) * 100));
+            } else {
+                setProgress(0);
+            }
 
             const uploadChunk = async (chunkIndex) => {
                 if (abortControllerRef.current?.signal.aborted) {
@@ -505,6 +604,7 @@ export const UploadProvider = ({ children }) => {
 
                 await uploadChunkWithRetry(
                     uploadId, 
+                    uploadTokenRef.current,
                     chunkIndex, 
                     chunk, 
                     chunkTimeoutMs,
@@ -528,36 +628,21 @@ export const UploadProvider = ({ children }) => {
                 completedChunks.add(chunkIndex);
                 completedBytes += chunkBytes;
                 inProgressBytes.delete(chunkIndex);
-                
-                const uploadState = getUploadState(uploadId);
-                if (uploadState) {
-                    uploadState.completedChunks = Array.from(completedChunks);
-                    uploadState.timestamp = Date.now();
-                    saveUploadState(uploadId, uploadState);
-                }
+
+                saveUploadState(uploadId, {
+                    ...baseUploadState,
+                    completedChunks: Array.from(completedChunks),
+                    timestamp: Date.now()
+                });
             };
 
-            const runWithConcurrency = async (items, fn, limit) => {
-                const results = [];
-                const executing = new Set();
-                
-                for (const item of items) {
-                    const promise = fn(item).then(() => {
-                        executing.delete(promise);
-                    });
-                    executing.add(promise);
-                    results.push(promise);
-                    
-                    if (executing.size >= limit) {
-                        await Promise.race(executing);
-                    }
-                }
-                
-                return Promise.all(results);
-            };
-
-            const chunkIndices = Array.from({ length: totalChunks }, (_, i) => i);
+            const chunkIndices = Array.from({ length: totalChunks }, (_, i) => i)
+                .filter((chunkIndex) => !completedChunks.has(chunkIndex));
             await runWithConcurrency(chunkIndices, uploadChunk, maxConcurrentUploads);
+
+            if (abortControllerRef.current?.signal?.aborted) {
+                return null;
+            }
 
             const completeRes = await apiClient.completeUpload(uploadId);
             if (!completeRes.ok) {
@@ -565,7 +650,7 @@ export const UploadProvider = ({ children }) => {
                 throw new Error(errData.error || 'Error al completar la subida');
             }
 
-            clearUploadState(uploadId);
+            await clearPersistedUpload(uploadId);
 
             const data = await completeRes.json();
             setResult(data);
@@ -573,6 +658,7 @@ export const UploadProvider = ({ children }) => {
             setProgress(100);
             abortControllerRef.current = null;
             uploadIdRef.current = null;
+            uploadTokenRef.current = null;
             return data;
 
         } catch (err) {
@@ -584,8 +670,116 @@ export const UploadProvider = ({ children }) => {
             setError(userMessage);
             setStatus('error');
             abortControllerRef.current = null;
+            uploadIdRef.current = null;
+            uploadTokenRef.current = null;
         }
-    }, [uploadChunkWithRetry, updateSpeedAndEta, updateProgress]);
+    }, [clearPersistedUpload, persistUploadArtifacts, runWithConcurrency, updateProgress, updateSpeedAndEta, uploadChunkWithRetry]);
+
+    const uploadFile = useCallback(async (file, options = {}, originPath = '/') => {
+        return runUploadSession(file, options, originPath, null);
+    }, [runUploadSession]);
+
+    useEffect(() => {
+        if (resumeAttemptedRef.current) {
+            return;
+        }
+        resumeAttemptedRef.current = true;
+
+        let cancelled = false;
+
+        const resumeLatestUpload = async () => {
+            const [latestUpload] = getAllUploadStates();
+            if (!latestUpload || status !== 'idle') {
+                return;
+            }
+
+            startTransition(() => {
+                setStatus('preparing');
+                setError(null);
+                setResult(null);
+                setProgress(0);
+                setUploadSpeed(0);
+                setEta(null);
+            });
+
+            if (!latestUpload.chunkSize || !latestUpload.uploadToken) {
+                await clearPersistedUpload(latestUpload.uploadId);
+                if (!cancelled) {
+                    setStatus('idle');
+                }
+                return;
+            }
+
+            const persistedUpload = await getPersistedUpload(latestUpload.uploadId);
+            if (cancelled) return;
+
+            if (!persistedUpload?.file) {
+                await clearPersistedUpload(latestUpload.uploadId);
+                if (!cancelled) {
+                    setStatus('idle');
+                }
+                return;
+            }
+
+            setCurrentFile(persistedUpload.file);
+            setCurrentOptions(latestUpload.options || { expires: '7', password: '' });
+            setUploadOriginPath(latestUpload.originPath || '/');
+
+            const statusRes = await apiClient.getUploadStatus(latestUpload.uploadId, latestUpload.uploadToken);
+            if (cancelled) return;
+
+            if (!statusRes.ok) {
+                await clearPersistedUpload(latestUpload.uploadId);
+                if (!cancelled) {
+                    setStatus('idle');
+                }
+                return;
+            }
+
+            const remoteState = await statusRes.json();
+            if (cancelled) return;
+
+            if (remoteState.status === 'completed' && remoteState.fileId) {
+                await clearPersistedUpload(latestUpload.uploadId);
+                setCurrentFile(persistedUpload.file);
+                setCurrentOptions(latestUpload.options || { expires: '7', password: '' });
+                setUploadOriginPath(latestUpload.originPath || '/');
+                setResult({ fileId: remoteState.fileId, message: 'Subida completada' });
+                setProgress(100);
+                setStatus('complete');
+                return;
+            }
+
+            if (['cancelled'].includes(remoteState.status)) {
+                await clearPersistedUpload(latestUpload.uploadId);
+                if (!cancelled) {
+                    setStatus('idle');
+                }
+                return;
+            }
+
+            await runUploadSession(
+                persistedUpload.file,
+                latestUpload.options || {},
+                latestUpload.originPath || '/',
+                {
+                    uploadId: latestUpload.uploadId,
+                    uploadToken: latestUpload.uploadToken,
+                    completedChunks: remoteState.completedChunks || latestUpload.completedChunks || [],
+                    totalChunks: remoteState.totalChunks || latestUpload.totalChunks,
+                    chunkSize: latestUpload.chunkSize,
+                    options: latestUpload.options || {},
+                    originPath: latestUpload.originPath || '/',
+                }
+            );
+        };
+
+        resumeLatestUpload();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [clearPersistedUpload, runUploadSession, status]);
 
     // Verificar si hay una subida activa
     const isUploading = status === 'uploading';
@@ -600,6 +794,7 @@ export const UploadProvider = ({ children }) => {
             uploadSpeed,
             eta,
             currentFile,
+            currentOptions,
             uploadOriginPath,
             isUploading,
             // Acciones

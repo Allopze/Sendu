@@ -56,6 +56,7 @@ const FileItem = ({ name, size, onDelete }) => {
         <button 
           onClick={onDelete}
           className="opacity-0 group-hover:opacity-100 p-1.5 rounded-full hover:bg-red-500/10 hover:text-red-500 text-zinc-400 transition-all flex-shrink-0 ml-2"
+          aria-label={`Eliminar ${name}`}
         >
           <X size={16} />
         </button>

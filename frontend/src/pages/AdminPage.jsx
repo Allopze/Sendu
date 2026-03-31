@@ -44,6 +44,23 @@ const formatTimestamp = (value) => {
     return new Date(ts).toLocaleString();
 };
 
+const formatBytes = (value) => {
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) {
+        return '-';
+    }
+    if (bytes >= 1024 ** 3) {
+        return `${(bytes / (1024 ** 3)).toFixed(2)} GB`;
+    }
+    if (bytes >= 1024 ** 2) {
+        return `${(bytes / (1024 ** 2)).toFixed(1)} MB`;
+    }
+    if (bytes >= 1024) {
+        return `${(bytes / 1024).toFixed(0)} KB`;
+    }
+    return `${bytes} B`;
+};
+
 const truncateText = (value, maxLen = 120) => {
     const normalized = value === undefined || value === null ? '' : String(value);
     if (normalized.length <= maxLen) {
@@ -88,6 +105,9 @@ const AdminPage = () => {
     const [jobTypeFilter, setJobTypeFilter] = useState('all');
     const [loadingJobs, setLoadingJobs] = useState(false);
     const [jobActionRunning, setJobActionRunning] = useState('');
+    const [opsMetrics, setOpsMetrics] = useState(null);
+    const [opsReadiness, setOpsReadiness] = useState(null);
+    const [loadingOps, setLoadingOps] = useState(false);
     const [auditEntries, setAuditEntries] = useState([]);
     const [auditPagination, setAuditPagination] = useState({ page: 1, limit: 20, total: 0, totalPages: 1 });
     const [loadingAudit, setLoadingAudit] = useState(false);
@@ -181,7 +201,40 @@ const AdminPage = () => {
         }
     }, [readErrorMessage]);
 
+    const fetchOpsData = useCallback(async ({ showErrorToast = true } = {}) => {
+        setLoadingOps(true);
+        try {
+            const [metricsRes, readinessRes] = await Promise.all([
+                apiClient.getAdminMetrics(),
+                apiClient.getHealthReady()
+            ]);
+
+            if (!metricsRes.ok) {
+                throw new Error(await readErrorMessage(metricsRes, 'No se pudo cargar la observabilidad'));
+            }
+
+            const metricsData = await metricsRes.json();
+            setOpsMetrics(metricsData);
+
+            if (readinessRes.ok) {
+                setOpsReadiness(await readinessRes.json());
+            } else {
+                setOpsReadiness(null);
+            }
+        } catch (err) {
+            if (showErrorToast) {
+                setToast({ message: err.message || 'Error cargando observabilidad', type: 'error' });
+            }
+        } finally {
+            setLoadingOps(false);
+        }
+    }, [readErrorMessage]);
+
     useEffect(() => {
+        if (activeTab === 'ops') {
+            fetchOpsData({ showErrorToast: false });
+            return;
+        }
         if (activeTab === 'jobs') {
             fetchJobsData({ type: jobTypeFilter, showErrorToast: false });
             return;
@@ -189,7 +242,7 @@ const AdminPage = () => {
         if (activeTab === 'audit') {
             fetchAuditData(1, auditPagination.limit, false);
         }
-    }, [activeTab, jobTypeFilter, auditPagination.limit, fetchJobsData, fetchAuditData]);
+    }, [activeTab, jobTypeFilter, auditPagination.limit, fetchAuditData, fetchJobsData, fetchOpsData]);
 
     // Check if settings have changed
     const hasChanges = () => {
@@ -407,11 +460,15 @@ const AdminPage = () => {
 
     const handleDeleteFile = async (id) => {
         try {
-            await apiClient.deleteFile(id);
+            const res = await apiClient.deleteFile(id);
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.error || 'No se pudo eliminar el archivo');
+            }
             fetchData();
             setToast({ message: 'Archivo eliminado', type: 'success' });
         }
-        catch { setToast({ message: 'Error', type: 'error' }); }
+        catch (err) { setToast({ message: err.message || 'Error', type: 'error' }); }
         setDeleteFileModal({ isOpen: false, fileId: null, fileName: '' });
     };
 
@@ -538,6 +595,7 @@ const AdminPage = () => {
         { id: 'templates', label: 'Plantillas Email', icon: Code },
         { id: 'users', label: 'Usuarios', icon: Users },
         { id: 'limits', label: 'Límites', icon: HardDrive },
+        { id: 'ops', label: 'Observabilidad', icon: Shield },
         { id: 'jobs', label: 'Cola de Jobs', icon: ListChecks },
         { id: 'audit', label: 'Auditoría', icon: History },
     ];
@@ -1052,6 +1110,176 @@ const AdminPage = () => {
                                         {resettingRateLimits ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
                                         Reiniciar Rate Limits
                                     </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Observabilidad */}
+                    {activeTab === 'ops' && (
+                        <div className="animate-enter space-y-6">
+                            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                <div>
+                                    <h2 className={`text-xl font-bold mb-1 ${isDark ? 'text-white' : 'text-zinc-900'}`}>
+                                        Observabilidad
+                                    </h2>
+                                    <p className={`text-sm ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                        Señales operativas para uploads, descargas, almacenamiento y cola.
+                                    </p>
+                                </div>
+                                <button
+                                    onClick={() => fetchOpsData()}
+                                    disabled={loadingOps}
+                                    className={`flex items-center gap-2 px-4 py-2.5 text-sm rounded-xl font-medium transition-colors ${isDark ? 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
+                                >
+                                    {loadingOps ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                                    Actualizar
+                                </button>
+                            </div>
+
+                            <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
+                                {[
+                                    {
+                                        label: 'Health',
+                                        value: (opsMetrics?.health?.status || opsReadiness?.status || 'sin datos').toUpperCase(),
+                                        tone: (opsMetrics?.health?.status || opsReadiness?.status) === 'ok'
+                                            ? (isDark ? 'text-green-300' : 'text-green-700')
+                                            : (isDark ? 'text-amber-300' : 'text-amber-700')
+                                    },
+                                    {
+                                        label: 'Uploads Activos',
+                                        value: opsMetrics?.summary?.uploads?.activeSessions ?? '-',
+                                        tone: isDark ? 'text-white' : 'text-zinc-900'
+                                    },
+                                    {
+                                        label: 'Descargas Fallidas',
+                                        value: opsMetrics?.summary?.downloads?.failedOrAborted ?? '-',
+                                        tone: isDark ? 'text-white' : 'text-zinc-900'
+                                    },
+                                    {
+                                        label: 'Jobs Muertos',
+                                        value: opsMetrics?.queue?.byStatus?.dead ?? 0,
+                                        tone: (opsMetrics?.queue?.byStatus?.dead || 0) > 0
+                                            ? (isDark ? 'text-red-300' : 'text-red-700')
+                                            : (isDark ? 'text-white' : 'text-zinc-900')
+                                    }
+                                ].map((item) => (
+                                    <div key={item.label} className={`p-4 rounded-xl border ${isDark ? 'border-white/10 bg-white/5' : 'border-zinc-200 bg-zinc-50'}`}>
+                                        <p className={`text-xs uppercase tracking-wider ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                            {item.label}
+                                        </p>
+                                        <p className={`text-2xl font-bold mt-1 ${item.tone}`}>
+                                            {item.value}
+                                        </p>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <div className={`p-5 rounded-2xl ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
+                                <div className="flex items-center justify-between gap-4 flex-wrap">
+                                    <div>
+                                        <h3 className={`font-semibold ${isDark ? 'text-white' : 'text-zinc-900'}`}>
+                                            Alertas derivadas
+                                        </h3>
+                                        <p className={`text-sm ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                            Heurísticas rápidas para saber si el release está respirando bien.
+                                        </p>
+                                    </div>
+                                    <span className={`text-sm ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                        Uptime: {Math.round(opsMetrics?.metrics?.uptimeSeconds || 0)}s
+                                    </span>
+                                </div>
+
+                                <div className="mt-4 flex flex-col gap-3">
+                                    {(opsMetrics?.alerts || []).map((alert) => (
+                                        <div
+                                            key={alert.code}
+                                            className={`rounded-xl border px-4 py-3 ${alert.severity === 'high'
+                                                ? (isDark ? 'border-red-500/30 bg-red-500/10 text-red-200' : 'border-red-200 bg-red-50 text-red-700')
+                                                : (isDark ? 'border-amber-500/30 bg-amber-500/10 text-amber-100' : 'border-amber-200 bg-amber-50 text-amber-700')
+                                            }`}
+                                        >
+                                            <div className="flex items-center justify-between gap-3">
+                                                <span className="font-medium">{alert.message}</span>
+                                                <span className="text-xs uppercase tracking-wider opacity-80">{alert.severity}</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {(opsMetrics?.alerts || []).length === 0 && (
+                                        <div className={`rounded-xl border px-4 py-3 ${isDark ? 'border-green-500/20 bg-green-500/10 text-green-200' : 'border-green-200 bg-green-50 text-green-700'}`}>
+                                            Sin alertas activas derivadas en esta muestra.
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                                <div className={`p-5 rounded-2xl ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
+                                    <h3 className={`font-semibold mb-4 ${isDark ? 'text-white' : 'text-zinc-900'}`}>
+                                        Estado del servicio
+                                    </h3>
+                                    <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+                                        <div>
+                                            <dt className={labelClass}>Base de Datos</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.health?.db ? 'Lista' : 'No lista'}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>Uploads</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.health?.uploads ? 'Writable' : 'Bloqueado'}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>Data</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.health?.data ? 'Writable' : 'Bloqueado'}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>Ready Endpoint</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsReadiness?.status || '-'}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>Espacio Libre</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>
+                                                {formatBytes(opsMetrics?.summary?.storage?.freeBytes)}
+                                            </dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>Capacidad Total</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>
+                                                {formatBytes(opsMetrics?.summary?.storage?.sizeBytes)}
+                                            </dd>
+                                        </div>
+                                    </dl>
+                                </div>
+
+                                <div className={`p-5 rounded-2xl ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
+                                    <h3 className={`font-semibold mb-4 ${isDark ? 'text-white' : 'text-zinc-900'}`}>
+                                        Resumen de tráfico
+                                    </h3>
+                                    <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+                                        <div>
+                                            <dt className={labelClass}>Requests Totales</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.summary?.http?.totalRequests ?? '-'}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>Errores 5xx</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.summary?.http?.serverErrors ?? '-'}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>Uploads Iniciados</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.summary?.uploads?.started ?? '-'}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>Uploads Completados</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.summary?.uploads?.completed ?? '-'}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>Sesiones Estancadas</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.summary?.uploads?.staleSessions ?? '-'}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>Queue Pending</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.queue?.byStatus?.pending ?? 0}</dd>
+                                        </div>
+                                    </dl>
                                 </div>
                             </div>
                         </div>
