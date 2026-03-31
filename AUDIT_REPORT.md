@@ -2,15 +2,15 @@
 
 Auditando el repositorio completo encontré una base técnica con buenas intenciones y varias piezas ya maduras para una app single-instance: `build`, `lint` y `tests` pasan; hay health/readiness checks, cola de jobs, backups, limpieza de expirados, persistencia de sesiones/CSRF en SQLite, validación MIME por contenido y verificación de checksum. También ejecuté la app en `NODE_ENV=production`, probé flujos HTTP reales y recorrí la UI con Chromium headless.
 
-La situación actual es mejor que en la auditoría base: el secuestro de sesiones de upload por chunks, la fuga de `passwordHash`/`serverPath`, el bootstrap inseguro del primer admin, el solapamiento visible de rate limiting y el árbol vulnerable de producción ya no son hoy los blockers activos. El problema es que esos fixes no alcanzan por sí solos el estándar de release para una app tipo WeTransfer: la reanudación tras refresh/crash sigue incompleta, la observabilidad aún es parcial, el smoke E2E browser solo cubre el happy path y la promesa de producto todavía va por delante de la confiabilidad operativa real.
+La situación actual es bastante mejor que en la auditoría base: el secuestro de sesiones de upload por chunks, la fuga de `passwordHash`/`serverPath`, el bootstrap inseguro del primer admin, el solapamiento visible de rate limiting, el árbol vulnerable de producción y el bloqueo del resumable tras refresh/crash ya no son hoy los blockers activos. En validación local, la reanudación end-to-end tras refresh/crash ya completó correctamente en Chromium y la suite E2E browser cubre flujo guest, caso negativo de auth guard, flujo autenticado y resume.
 
 - Veredicto claro: **No lista para producción**
-- Motivo principal del veredicto: **el flujo crítico de subida y compartición todavía no es confiable end-to-end tras refresh/crash y la operación sigue corta en observabilidad/cobertura E2E para un release serio**
+- Motivo principal del veredicto: **aunque el flujo crítico ya quedó confiable en las validaciones locales, la operación sigue demasiado dependiente del panel interno y el comportamiento bajo carga/archivos grandes reales sigue insuficientemente verificado para un release serio**
 
 ## Actualización de la última pasada de fixes
 
 - Estado de la pasada: **completada con validación**
-- Validaciones ejecutadas tras los cambios: `npm test` (`76/76`), `npm run lint`, `npm run build`, `npm audit --omit=dev`, `npm run test:e2e:smoke` (`1 passed`, `1 skipped`)
+- Validaciones ejecutadas tras los cambios: `npm test` (`77/77`), `npm run lint`, `npm run build`, `npm audit --omit=dev`, `npm run test:e2e:smoke` (`4 passed`)
 - Hallazgos mitigados en código en esta pasada:
 - 1. Se añadió `uploadToken` firmado para ligar cada chunk a su sesión de upload.
 - 2. `/api/user/files` y `/api/admin/files` dejaron de exponer `passwordHash` y `serverPath`; ahora devuelven `hasPassword`.
@@ -34,24 +34,30 @@ La situación actual es mejor que en la auditoría base: el secuestro de sesione
 - 20. La observabilidad operativa subió un escalón: `/api/admin/metrics` expone estado derivado, uploads activos/estancados, almacenamiento y alertas operativas; además admin ya tiene una vista de observabilidad consumiendo esos datos.
 - 21. La compresión ZIP de múltiples archivos salió del hilo principal y pasó a un Web Worker (`[frontend/src/workers/zipWorker.js](/home/allopze/dev/sendu/frontend/src/workers/zipWorker.js)`), reduciendo congelamientos visibles y mejorando la robustez para cargas pesadas.
 - 22. La persistencia de resumable se reforzó en cliente con múltiples backends (`OPFS`, `IndexedDB`, `Cache Storage`) y timeouts defensivos para evitar bloqueos durante la rehidratación.
+- 23. Se cerró el atasco real del resumable tras refresh/crash: el efecto de auto-resume ya no se autocancela al pasar por `preparing`, el cliente conserva `uploadId`/archivo/estado y la reanudación completó end-to-end en browser real.
+- 24. El backend dejó de autoboicotear el resume con temporales abortados: los `*.uploading` ya no cuentan como bytes válidos de la sesión y el smoke resume dejó de fallar por `HTTP 400` tras recargar.
+- 25. La ruta de chunks ahora expone contadores operativos separados (`upload_chunk_client_error`, `upload_chunk_server_error`) y el panel admin muestra tasas/SLOs de uploads, descargas, resume y 5xx.
+- 26. La observabilidad operativa se volvió más accionable: `[docs/OPERATIONS.md](/home/allopze/dev/sendu/docs/OPERATIONS.md)` ya documenta health, umbrales, alertas mínimas y runbooks concretos; `[docs/API.md](/home/allopze/dev/sendu/docs/API.md)` también refleja `GET /api/auth/csrf`, `GET /api/upload/status/:uploadId` y el contrato de `/api/admin/metrics`.
+- 27. La suite Playwright versionada dejó de ser solo happy path: hoy cubre guest upload/share/download, auth guard negativo, upload autenticado visible en dashboard y resume tras refresh/crash; en esta pasada quedó `4/4` verde.
+- 28. Se añadió regresión backend para reanudación con residuos de `*.uploading`, evitando reabrir el bug donde el propio servidor rechazaba un resume válido.
 - Hallazgos todavía pendientes tras esta pasada:
-- 1. La reanudación tras refresh/crash sigue siendo **parcial**: el estado de sesión y el `uploadId` sobreviven al refresh, pero en el smoke browser la subida no terminó automáticamente tras recargar.
-- 2. La observabilidad y accesibilidad están mejor, pero siguen siendo parciales para estándar producción: aún faltan alertas externas, trazas, SLOs/runbooks más concretos y una pasada más profunda de UX/a11y.
-- 3. Ya existe E2E browser estable y versionado para el happy path, pero la cobertura crítica sigue incompleta: el caso de refresh/resume está versionado como `fixme` y no pasa todavía.
-- 4. Persisten claims/capacidades WeTransfer no implementadas de verdad, especialmente reanudación robusta y recuperación confiable ante refresh/crash.
-- Nota: **la nota global original se mantiene como referencia de la auditoría base; esta pasada mejora el estado del repo, pero no lo suficiente para cambiar el veredicto final**
+- 1. La observabilidad mejoró mucho dentro del producto, pero siguen faltando alertas externas reales, trazas distribuidas y dashboards fuera del panel admin.
+- 2. No hay evidencia suficiente de comportamiento con tráfico real, multi-GB, presión alta de disco/RAM o topologías multi-node.
+- 3. Persisten claims/capacidades WeTransfer no implementadas a nivel de producto completo, especialmente malware scanning obligatorio, deliverability real y experiencia de grandes archivos por encima del rango validado.
+- 4. La cobertura E2E browser ya es útil para release, pero aún no cubre restauración de sesión autenticada, errores de password/download y escenarios de degradación/red más agresivos.
+- Nota: **la nota global se actualiza tras esta pasada, pero el veredicto sigue siendo conservador por brechas operativas y de escalabilidad aún no verificadas**
 
 # 2. Nota global
 
-- Nota total: **41/100**
-- Correctitud funcional: **55/100**
-- Seguridad: **28/100**
-- Performance: **48/100**
-- UX/UI: **52/100**
-- Calidad de código: **45/100**
-- Testing: **35/100**
-- Operación/observabilidad: **50/100**
-- Preparación para producción: **32/100**
+- Nota total: **58/100**
+- Correctitud funcional: **72/100**
+- Seguridad: **60/100**
+- Performance: **56/100**
+- UX/UI: **60/100**
+- Calidad de código: **57/100**
+- Testing: **72/100**
+- Operación/observabilidad: **63/100**
+- Preparación para producción: **52/100**
 
 # 3. Hallazgos críticos
 
@@ -266,9 +272,9 @@ La situación actual es mejor que en la auditoría base: el secuestro de sesione
 - **[Mitigado en esta pasada]** El dashboard ya muestra correctamente el badge `Protegido` consumiendo `hasPassword` en vez de asumir `file.password`. Evidencia en `[frontend/src/pages/DashboardPage.jsx](/home/allopze/dev/sendu/frontend/src/pages/DashboardPage.jsx)` y contrato sanitizado de `[backend/server.js](/home/allopze/dev/sendu/backend/server.js)`.
 - **[Mitigado en esta pasada]** El modal de borrado ya comprueba `res.ok` y no reporta éxito falso cuando la respuesta del backend falla. Evidencia en `[frontend/src/pages/DashboardPage.jsx](/home/allopze/dev/sendu/frontend/src/pages/DashboardPage.jsx)` y `[frontend/src/pages/AdminPage.jsx](/home/allopze/dev/sendu/frontend/src/pages/AdminPage.jsx)`.
 - **[Mitigado en esta pasada]** El contador de descargas ya no se incrementa antes de tiempo; el backend solo suma `downloadCount` cuando `res.download()` completa sin error, y el test cubre tanto éxito como archivo faltante. Ver `[backend/server.js](/home/allopze/dev/sendu/backend/server.js)` y `[backend/tests/download.test.js](/home/allopze/dev/sendu/backend/tests/download.test.js)`.
-- **[Parcialmente mitigado en esta pasada]** Ya existe rehidratación desde `/api/upload/status/:uploadId`, persistencia de sesión en cliente e intento de reanudar con el mismo `uploadId`; en browser real confirmé que el estado y el `uploadId` sobreviven al refresh. Aun así, la subida no completó automáticamente tras recargar, así que sigue siendo **insuficiente para producción**. Evidencia en `[frontend/src/context/UploadContext.jsx](/home/allopze/dev/sendu/frontend/src/context/UploadContext.jsx)`, `[frontend/src/lib/uploadPersistence.js](/home/allopze/dev/sendu/frontend/src/lib/uploadPersistence.js)` y `[backend/server.js](/home/allopze/dev/sendu/backend/server.js)`.
+- **[Mitigado en esta pasada]** El resumable tras refresh/crash ya completa end-to-end en browser real: el cliente rehidrata estado, recupera el mismo `uploadId`, consulta `/api/upload/status/:uploadId` y termina la subida tras recargar. Además quedó cubierta la regresión de temporales `*.uploading` en backend. Evidencia en `[frontend/src/context/UploadContext.jsx](/home/allopze/dev/sendu/frontend/src/context/UploadContext.jsx)`, `[backend/chunkRouter.js](/home/allopze/dev/sendu/backend/chunkRouter.js)`, `[backend/server.js](/home/allopze/dev/sendu/backend/server.js)`, `[backend/tests/e2eUploadDownload.test.js](/home/allopze/dev/sendu/backend/tests/e2eUploadDownload.test.js)` y `[e2e/smoke.spec.js](/home/allopze/dev/sendu/e2e/smoke.spec.js)`.
 - **[Confirmado]** La opción `thumbnail_generate` aparece en la UI de administración, pero no existe handler registrado para ese tipo de job. Evidencia en `[frontend/src/pages/AdminPage.jsx:30](/home/allopze/dev/sendu/frontend/src/pages/AdminPage.jsx#L30)` a `[frontend/src/pages/AdminPage.jsx:37](/home/allopze/dev/sendu/frontend/src/pages/AdminPage.jsx#L37)` y `[backend/lib/jobHandlers.js:27](/home/allopze/dev/sendu/backend/lib/jobHandlers.js#L27)` a `[backend/lib/jobHandlers.js:32](/home/allopze/dev/sendu/backend/lib/jobHandlers.js#L32)`.
-- **[Mitigado parcialmente en esta pasada]** Ya existe una suite E2E browser versionada dentro del repo con Playwright y el happy path guest upload -> share -> download pasa contra build productiva local. Sigue faltando volver verde el escenario de refresh/resume, que quedó explícitamente versionado como `fixme` en `[e2e/smoke.spec.js](/home/allopze/dev/sendu/e2e/smoke.spec.js)`.
+- **[Mitigado en esta pasada]** Ya existe una suite E2E browser versionada dentro del repo con Playwright y en esta pasada quedó `4/4` verde contra build productiva local: guest upload -> share -> download, auth guard negativo, flujo autenticado con dashboard y resume tras refresh/crash. Sigue faltando ampliarla a más negativos y degradaciones, pero ya sirve como señal de release básica.
 - **[Confirmado]** El E2E backend cubre un archivo de 11 bytes (`hello sendu`), no valida grandes subidas, reintentos reales, caída de red ni concurrencia. Evidencia en `[backend/tests/e2eUploadDownload.test.js:56](/home/allopze/dev/sendu/backend/tests/e2eUploadDownload.test.js#L56)` a `[backend/tests/e2eUploadDownload.test.js:107](/home/allopze/dev/sendu/backend/tests/e2eUploadDownload.test.js#L107)`.
 - **[Confirmado]** La página de éxito dice que el archivo está “encriptado” sin que exista cifrado de archivos en backend; es un bug de producto/UX, no solo copy. Evidencia en `[frontend/src/pages/HomePage.jsx:789](/home/allopze/dev/sendu/frontend/src/pages/HomePage.jsx#L789)`.
 
@@ -299,8 +305,8 @@ La situación actual es mejor que en la auditoría base: el secuestro de sesione
 
 - **[Confirmado]** La app no ha demostrado soportar el caso WeTransfer que dice vender. El límite por defecto es 100MB para registrados y 50MB para invitados; no hay validación real en esta auditoría de multi-GB, resumable after restart ni backpressure bajo carga.
 - **[Mitigado parcialmente en esta pasada]** La creación de ZIP de múltiples archivos ya no corre en el hilo principal: el frontend mueve la compresión a un Web Worker. Esto reduce congelamientos de UI, pero no sustituye una estrategia realmente robusta de grandes cargas/reanudación bajo refresh o presión de memoria.
-- **[Parcialmente mitigado]** La reanudación tras refresh/crash ya tiene infraestructura de estado y sincronización con servidor, pero el smoke browser no cerró el flujo end-to-end; sigue siendo un hueco de confiabilidad importante.
-- **[Parcialmente mitigado]** La observabilidad ya incluye métricas de inicio/completado/abort/fallo de descargas, `requestId` en respuestas de error/404, estado derivado en `/api/admin/metrics` y una vista de observabilidad en admin. Aun así, siguen faltando alertas externas, trazas, SLOs y dashboards operacionales fuera de la propia app.
+- **[Mitigado en esta pasada]** La reanudación tras refresh/crash ya pasó end-to-end en Chromium sobre build productiva local, incluyendo recarga durante la subida y finalización con la misma sesión. El riesgo residual se mueve ahora a escenarios no verificados de mayor estrés, otros navegadores y cargas más grandes.
+- **[Parcialmente mitigado]** La observabilidad ya incluye métricas de inicio/completado/abort/fallo de descargas, `requestId` en respuestas de error/404, estado derivado en `/api/admin/metrics`, SLOs/resúmenes de resume/chunk errors y runbooks documentados. Aun así, siguen faltando alertas externas reales, trazas y dashboards operacionales fuera de la propia app.
 - **[Confirmado]** Hay readiness, backups y runbooks mínimos, lo cual suma a favor. Ver `[backend/server.js:2657](/home/allopze/dev/sendu/backend/server.js#L2657)` a `[backend/server.js:2684](/home/allopze/dev/sendu/backend/server.js#L2684)` y `[docs/OPERATIONS.md:3](/home/allopze/dev/sendu/docs/OPERATIONS.md#L3)` a `[docs/OPERATIONS.md:49](/home/allopze/dev/sendu/docs/OPERATIONS.md#L49)`.
 - **[Probable]** SQLite con `better-sqlite3` puede sostener bien un despliegue single-host, pero no hay evidencia de comportamiento bajo ráfagas reales de uploads concurrentes, escrituras altas o topología multi-node. La propia documentación recomienda migrar a PostgreSQL/MySQL para mayor carga. Ver `[docs/ARCHITECTURE.md:69](/home/allopze/dev/sendu/docs/ARCHITECTURE.md#L69)` a `[docs/ARCHITECTURE.md:72](/home/allopze/dev/sendu/docs/ARCHITECTURE.md#L72)`.
 - **[No verificado]** Deliverability real de emails, bounce handling, DKIM/SPF/DMARC, antivirus real con ClamAV y recuperación ante desastre end-to-end.
@@ -315,12 +321,12 @@ La situación actual es mejor que en la auditoría base: el secuestro de sesione
 - **Impacto alto / esfuerzo medio:** separar `server.js` en rutas/servicios (`auth`, `upload`, `download`, `admin`) para reducir el riesgo de cambios laterales.
 - **[Completado parcialmente en esta pasada]** El zipping pesado de múltiples archivos se movió a Web Worker; sigue pendiente decidir si parte del procesamiento debe ir además a backend job para escenarios más grandes o más sensibles a memoria.
 - **[Completado parcialmente en esta pasada]** Se endureció accesibilidad básica: `aria-label`, `aria-live`, navegación por teclado y semántica en navbar/toasts/acciones icon-only.
-- **[Completado parcialmente en esta pasada]** Ya existe smoke E2E browser versionado con Playwright para el happy path principal. Sigue pendiente ampliar cobertura a refresh/resume y casos negativos antes de poder usarlo como señal suficiente de release.
-- **[Completado parcialmente en esta pasada]** Se amplió telemetría por transferencia: `upload_init`, `upload_resume_probe`, `upload_resume_available`, `upload_complete`, `download_start`, `download_abort`, `download_fail`, `download_complete`.
+- **[Completado en esta pasada]** Ya existe smoke E2E browser versionado con Playwright cubriendo happy path guest, auth guard negativo, flujo autenticado y resume tras refresh/crash; en la validación quedó `4/4` verde.
+- **[Completado en esta pasada]** Se amplió telemetría por transferencia y operación: `upload_init`, `upload_resume_probe`, `upload_resume_available`, `upload_chunk_client_error`, `upload_chunk_server_error`, `upload_complete`, `download_start`, `download_abort`, `download_fail`, `download_complete`.
 
 # 9. Nuevas funcionalidades recomendadas
 
-- **Prioridad 1:** cerrar uploads realmente reanudables con persistencia fiable del archivo cliente + re-sincronización servidor-cliente. Aporta valor directo al caso de uso principal y elimina una desventaja clara frente a WeTransfer.
+- **Prioridad 1:** aprovechar la base ya cerrada del resumable para endurecerla con escenarios de red más agresivos, archivos más grandes y soporte claramente documentado por navegador.
 - **Prioridad 1:** expiración configurable y límites de descarga visibles desde el share link y dashboard. Ya existe backend parcial; falta convertirlo en producto consistente.
 - **Prioridad 1:** protección de transferencia con contraseña bien representada en UI, opción de link de un solo uso y analítica básica de aperturas/descargas.
 - **Prioridad 2:** previews y thumbnails server-side para imágenes/documentos ligeros. Tiene sentido con el panel admin y mejora percepción de producto.
@@ -331,24 +337,23 @@ La situación actual es mejor que en la auditoría base: el secuestro de sesione
 
 ## Inmediato (antes de salir a producción)
 
-- Consolidar en producción la mitigación de `/api/upload/chunk` con smoke tests reales y revisión de telemetría.
-- Cerrar la reanudación tras refresh/crash: hoy ya conserva sesión/estado, pero todavía no completa el flujo de forma robusta en browser real.
-- Ampliar la suite Playwright ya versionada para cubrir refresh/resume, errores y casos autenticados además del happy path guest.
+- Integrar `/api/admin/metrics` con alertado externo real y dejar umbrales operativos cableados fuera del panel interno.
+- Validar con carga y archivos más grandes el comportamiento de resume, disco, memoria y cola antes de prometer un release tipo WeTransfer.
+- Mantener la suite Playwright verde en CI y ampliar al menos un caso negativo de descarga protegida y uno de sesión autenticada persistida.
 - Exponer y renderizar límites reales desde backend en toda la UI, no solo en copy puntual.
 
 ## Corto plazo (1–2 semanas)
 
 - Completar E2E browser para registro/login/upload/download/delete y casos negativos aprovechando la suite Playwright ya añadida.
 - Añadir tests de API para límites, ownership, expiración, descargas máximas y errores de chunk.
-- Terminar resumable uploads reales con persistencia fiable del archivo cliente y re-sincronización de chunks ya presentes en servidor.
+- Profundizar validación del resumable con degradación real de red, refresh repetido y archivos superiores al rango hoy smokeado.
 - Profundizar accesibilidad básica y estados de error/recuperación.
 - Definir una política de release que falle por CVEs altas y por ausencia de cobertura smoke mínima realmente verde.
 
 ## Medio plazo (1–2 meses)
 
 - Modularizar `server.js` y extraer capa de servicios.
-- Implementar resumable uploads realmente robustos y cancelación/recuperación fiables tras recarga/cierre.
-- Añadir observabilidad de producto y operación: métricas por transferencia, alertas, dashboards y runbooks más concretos.
+- Añadir observabilidad de producto y operación fuera de la app: métricas exportables, alertas, dashboards y trazas.
 - Mover zipping pesado y tareas derivadas a background/Web Worker.
 - Revisar estrategia de persistencia si se prevé tráfico alto o despliegue multi-node.
 
@@ -356,16 +361,16 @@ La situación actual es mejor que en la auditoría base: el secuestro de sesione
 
 - ¿Está lista para producción? **No**
 - Si la respuesta es no, ¿qué condiciones mínimas deben cumplirse para decir que sí?
-- 1. Cerrar de verdad el resumable upload tras refresh/crash; hoy la infraestructura mejoró, pero el flujo no completa end-to-end.
-- 2. Ampliar la suite E2E browser ya versionada hasta cubrir al menos resume, errores y un flujo autenticado.
-- 3. Completar observabilidad mínima operativa fuera del panel interno: alertas claras, señales de fallo de upload/download y documentación de respuesta.
+- 1. Integrar alertas externas reales y una señal operativa consumible fuera del panel admin.
+- 2. Validar con evidencia el comportamiento con archivos más grandes, presión de disco y algo de concurrencia real.
+- 3. Ampliar la suite E2E browser ya verde a descargas protegidas, persistencia autenticada y degradación de red más dura.
 - 4. Alinear toda la UI con límites/capacidades reales servidos por backend y terminar el hardening/documentación de variables de entorno por entorno.
 
 VEREDICTO FINAL
 - Estado: No lista
-- Nota total: 41
-- Riesgo principal: la superficie crítica de subida ya está bastante más cerrada, pero todavía no alcanza el estándar de producción por gaps de confiabilidad operativa y capacidades incompletas
+- Nota total: 58
+- Riesgo principal: la app ya pasó el flujo crítico localmente, pero sigue demasiado poco verificada fuera del entorno controlado y con observabilidad externa insuficiente
 - Mayor fortaleza: buena base operativa para single-instance con health checks, limpieza, backups y controles de integridad de archivo
-- Mayor debilidad: la promesa de producto sigue por delante de la confiabilidad real del flujo de uploads y operación
+- Mayor debilidad: el salto entre “funciona localmente” y “opera con confianza bajo tráfico real” sigue sin estar cerrado
 - ¿La liberaría hoy a producción?: No
-- Razón en una frase: el núcleo ya es más seguro que en la auditoría inicial, pero todavía faltan e2e/operación y capacidades críticas antes de llamar a esto un release de producción confiable
+- Razón en una frase: el núcleo ya mejoró mucho y el resume quedó verde, pero sin alertas externas y sin validación de carga/grandes archivos todavía no es un release de producción confiable

@@ -244,12 +244,17 @@ export const UploadProvider = ({ children }) => {
     const lastProgressUpdateRef = useRef({ time: Date.now(), bytes: 0 });
     const lastProgressSetRef = useRef(0);
     const resumeAttemptedRef = useRef(false);
+    const statusRef = useRef('idle');
 
     // Inicializar y precargar límites
     useEffect(() => {
         cleanupOldUploadStates();
         preloadLimits();
     }, []);
+
+    useEffect(() => {
+        statusRef.current = status;
+    }, [status]);
 
     // Warn on page unload while an upload is active. We do not cancel here so refresh/crash can resume.
     useEffect(() => {
@@ -404,7 +409,16 @@ export const UploadProvider = ({ children }) => {
                 if (xhr.status >= 200 && xhr.status < 300) {
                     resolve({ ok: true });
                 } else {
-                    reject(new Error(`Error al subir fragmento ${chunkIndex}: HTTP ${xhr.status}`));
+                    let serverMessage = '';
+                    try {
+                        const data = JSON.parse(xhr.responseText || '{}');
+                        if (typeof data?.error === 'string' && data.error.trim()) {
+                            serverMessage = ` - ${data.error.trim()}`;
+                        }
+                    } catch {
+                        // Ignore invalid JSON error payloads
+                    }
+                    reject(new Error(`Error al subir fragmento ${chunkIndex}: HTTP ${xhr.status}${serverMessage}`));
                 }
             };
             
@@ -543,6 +557,7 @@ export const UploadProvider = ({ children }) => {
                     size: file.size,
                     mimeType: file.type,
                     totalChunks,
+                    chunkSize,
                     ...options
                 });
 
@@ -571,7 +586,11 @@ export const UploadProvider = ({ children }) => {
                 originPath,
                 timestamp: Date.now()
             };
-            await persistUploadArtifacts(uploadId, file, baseUploadState);
+            if (resumeState) {
+                saveUploadState(uploadId, baseUploadState);
+            } else {
+                await persistUploadArtifacts(uploadId, file, baseUploadState);
+            }
 
             const completedChunks = new Set(initialCompletedChunks.filter((chunkIndex) => (
                 Number.isInteger(chunkIndex) && chunkIndex >= 0 && chunkIndex < totalChunks
@@ -689,7 +708,7 @@ export const UploadProvider = ({ children }) => {
 
         const resumeLatestUpload = async () => {
             const [latestUpload] = getAllUploadStates();
-            if (!latestUpload || status !== 'idle') {
+            if (!latestUpload || statusRef.current !== 'idle') {
                 return;
             }
 
@@ -779,7 +798,7 @@ export const UploadProvider = ({ children }) => {
         return () => {
             cancelled = true;
         };
-    }, [clearPersistedUpload, runUploadSession, status]);
+    }, [clearPersistedUpload, runUploadSession]);
 
     // Verificar si hay una subida activa
     const isUploading = status === 'uploading';

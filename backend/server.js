@@ -1311,7 +1311,7 @@ const validateMimeType = (mimeType, filename) => {
 };
 
 app.post('/api/upload/init', asyncHandler(async (req, res) => {
-    const { originalName, size, mimeType, totalChunks, checksum } = req.body;
+    const { originalName, size, mimeType, totalChunks, checksum, chunkSize } = req.body;
 
     // Validate required fields
     if (!originalName || typeof originalName !== 'string') {
@@ -1322,6 +1322,9 @@ app.post('/api/upload/init', asyncHandler(async (req, res) => {
     }
     if (!totalChunks || typeof totalChunks !== 'number' || totalChunks <= 0) {
         return res.status(400).json({ error: 'Número de chunks inválido' });
+    }
+    if (chunkSize !== undefined && (typeof chunkSize !== 'number' || chunkSize <= 0 || chunkSize > MAX_CHUNK_UPLOAD_BYTES)) {
+        return res.status(400).json({ error: 'Tamaño de chunk inválido' });
     }
 
     // Sanitize filename (remove path traversal attempts)
@@ -1470,6 +1473,7 @@ app.post('/api/upload/init', asyncHandler(async (req, res) => {
         size,
         mimeType,
         totalChunks,
+        chunkSize: chunkSize || null,
         userId: req.session.userId || null,
         fingerprint: req.session.userId ? null : guestFingerprint,
         ipFingerprint: req.session.userId ? null : ipFingerprint,
@@ -1548,11 +1552,28 @@ app.get('/api/upload/status/:uploadId', asyncHandler(async (req, res) => {
                 const chunkIndex = parseInt(match[1], 10);
                 if (Number.isNaN(chunkIndex)) continue;
 
-                completedChunks.push(chunkIndex);
-
                 try {
-                    const stat = await fsPromises.stat(path.join(uploadPath, entry));
-                    uploadedBytes += stat.size;
+                    const chunkPath = path.join(uploadPath, entry);
+                    const stat = await fsPromises.stat(chunkPath);
+                    const configuredChunkSize = Number.isFinite(meta.chunkSize) && meta.chunkSize > 0
+                        ? meta.chunkSize
+                        : Math.ceil(meta.size / Math.max(meta.totalChunks || 1, 1));
+                    const expectedSize = chunkIndex === (meta.totalChunks - 1)
+                        ? Math.max(0, meta.size - (configuredChunkSize * chunkIndex))
+                        : configuredChunkSize;
+
+                    if (stat.size === expectedSize) {
+                        completedChunks.push(chunkIndex);
+                        uploadedBytes += stat.size;
+                        continue;
+                    }
+
+                    logger.warn('Ignoring partial chunk during resume probe', {
+                        uploadId,
+                        chunkIndex,
+                        expectedSize,
+                        actualSize: stat.size
+                    });
                 } catch {
                     // Ignore races with cleanup/resume
                 }
@@ -3213,7 +3234,15 @@ app.get('/api/admin/metrics', requireAdmin, asyncHandler(async (req, res) => {
     const totalDownloadsStarted = counters.download_start || 0;
     const totalDownloadsCompleted = counters.download_complete || 0;
     const totalDownloadsFailed = (counters.download_fail || 0) + (counters.download_abort || 0);
+    const totalResumeProbes = counters.upload_resume_probe || 0;
+    const totalResumeAvailable = counters.upload_resume_available || 0;
+    const totalChunkClientErrors = counters.upload_chunk_client_error || 0;
+    const totalChunkServerErrors = counters.upload_chunk_server_error || 0;
     const totalHttpRequests = (counters.http_2xx || 0) + (counters.http_4xx || 0) + (counters.http_5xx || 0);
+    const uploadCompletionRate = totalUploadsStarted > 0 ? totalUploadsCompleted / totalUploadsStarted : null;
+    const downloadSuccessRate = totalDownloadsStarted > 0 ? totalDownloadsCompleted / totalDownloadsStarted : null;
+    const resumeAvailabilityRate = totalResumeProbes > 0 ? totalResumeAvailable / totalResumeProbes : null;
+    const httpServerErrorRate = totalHttpRequests > 0 ? (counters.http_5xx || 0) / totalHttpRequests : null;
     const activeUploads = db.prepare(`
         SELECT COUNT(*) as total
         FROM upload_sessions
@@ -3262,6 +3291,34 @@ app.get('/api/admin/metrics', requireAdmin, asyncHandler(async (req, res) => {
             message: `Hay ${staleUploads} subidas activas sin actividad reciente.`
         });
     }
+    if (typeof resumeAvailabilityRate === 'number' && totalResumeProbes >= 3 && resumeAvailabilityRate < 0.6) {
+        alerts.push({
+            code: 'resume_recovery_degraded',
+            severity: 'medium',
+            message: `La reanudación solo recuperó ${Math.round(resumeAvailabilityRate * 100)}% de las sesiones consultadas desde el último arranque.`
+        });
+    }
+    if (totalChunkServerErrors > 0) {
+        alerts.push({
+            code: 'chunk_server_errors',
+            severity: 'high',
+            message: `Se registraron ${totalChunkServerErrors} errores 5xx procesando fragmentos de subida.`
+        });
+    }
+    if (typeof downloadSuccessRate === 'number' && totalDownloadsStarted >= 5 && downloadSuccessRate < 0.9) {
+        alerts.push({
+            code: 'download_success_rate_low',
+            severity: 'medium',
+            message: `La tasa de éxito de descargas cayó a ${Math.round(downloadSuccessRate * 100)}%.`
+        });
+    }
+    if (typeof uploadCompletionRate === 'number' && totalUploadsStarted >= 5 && uploadCompletionRate < 0.75) {
+        alerts.push({
+            code: 'upload_completion_rate_low',
+            severity: 'medium',
+            message: `La tasa de finalización de subidas cayó a ${Math.round(uploadCompletionRate * 100)}%.`
+        });
+    }
 
     res.json({
         metrics: snapshot,
@@ -3281,23 +3338,51 @@ app.get('/api/admin/metrics', requireAdmin, asyncHandler(async (req, res) => {
                 cancelled: totalUploadsCancelled,
                 inProgressEstimate: Math.max(0, totalUploadsStarted - totalUploadsCompleted - totalUploadsCancelled),
                 activeSessions: activeUploads,
-                staleSessions: staleUploads
+                staleSessions: staleUploads,
+                completionRate: uploadCompletionRate
             },
             downloads: {
                 started: totalDownloadsStarted,
                 completed: totalDownloadsCompleted,
-                failedOrAborted: totalDownloadsFailed
+                failedOrAborted: totalDownloadsFailed,
+                successRate: downloadSuccessRate
+            },
+            resumable: {
+                probes: totalResumeProbes,
+                availableSessions: totalResumeAvailable,
+                availabilityRate: resumeAvailabilityRate,
+                chunkClientErrors: totalChunkClientErrors,
+                chunkServerErrors: totalChunkServerErrors
             },
             http: {
                 totalRequests: totalHttpRequests,
                 ok: counters.http_2xx || 0,
                 clientErrors: counters.http_4xx || 0,
-                serverErrors: counters.http_5xx || 0
+                serverErrors: counters.http_5xx || 0,
+                serverErrorRate: httpServerErrorRate
             },
             storage: {
                 freeBytes: disk?.free || null,
                 sizeBytes: disk?.size || null,
                 freePercent: diskFreePercent
+            }
+        },
+        slo: {
+            uploads: {
+                targetCompletionRate: 0.98,
+                currentCompletionRate: uploadCompletionRate
+            },
+            downloads: {
+                targetSuccessRate: 0.99,
+                currentSuccessRate: downloadSuccessRate
+            },
+            resumable: {
+                targetAvailabilityRate: 0.9,
+                currentAvailabilityRate: resumeAvailabilityRate
+            },
+            http: {
+                targetServerErrorRate: 0.01,
+                currentServerErrorRate: httpServerErrorRate
             }
         }
     });

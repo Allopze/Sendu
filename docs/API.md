@@ -7,6 +7,7 @@ Base: /api
 - POST /auth/register
 - POST /auth/login
 - POST /auth/logout
+- GET /auth/csrf
 - GET /auth/me
 - GET /auth/verify
 - POST /auth/resend-verification
@@ -17,6 +18,7 @@ Base: /api
 ## Upload
 
 - POST /upload/init
+- GET /upload/status/:uploadId
 - POST /upload/complete
 - POST /upload/cancel
 - POST /upload/chunk (ruta optimizada)
@@ -70,3 +72,5 @@ Base: /api
 
 - La mayoría de endpoints requieren sesión y CSRF (ver docs/SECURITY.md).
 - Las rutas públicas de lectura están exentas de CSRF.
+- `/upload/status/:uploadId` requiere `x-upload-token` o `uploadToken` de la sesión de subida.
+- `/admin/metrics` devuelve `alerts`, `summary` y `slo` para consumo humano o polling externo.

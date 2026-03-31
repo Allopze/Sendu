@@ -53,7 +53,8 @@ export const createChunkRouter = (options) => {
             if (isNaN(chunkIndex) || chunkIndex < 0) {
                 return cb(new Error('Índice de fragmento inválido'));
             }
-            cb(null, `${chunkIndex}.part`);
+            req.chunkFinalName = `${chunkIndex}.part`;
+            cb(null, `${chunkIndex}.${Date.now()}-${Math.random().toString(16).slice(2)}.uploading`);
         }
     });
 
@@ -104,7 +105,7 @@ export const createChunkRouter = (options) => {
         let total = 0;
         const entries = await fsPromises.readdir(dirPath);
         for (const entry of entries) {
-            if (entry === 'meta.json') continue;
+            if (entry === 'meta.json' || entry.endsWith('.uploading')) continue;
             const filePath = path.join(dirPath, entry);
             try {
                 const stat = await fsPromises.stat(filePath);
@@ -169,6 +170,7 @@ export const createChunkRouter = (options) => {
                 const session = db.prepare('SELECT status, createdAt, userId, ipFingerprint FROM upload_sessions WHERE uploadId = ?').get(uploadId);
                 if (!session) {
                     try { await fsPromises.unlink(req.file.path); } catch {}
+                    metrics.increment('upload_chunk_client_error', 1);
                     return res.status(404).json({ error: 'Sesión de subida no encontrada' });
                 }
                 const uploadToken = req.get('x-upload-token') || req.query.uploadToken;
@@ -179,14 +181,17 @@ export const createChunkRouter = (options) => {
                     ipFingerprint: session.ipFingerprint || null,
                 })) {
                     try { await fsPromises.unlink(req.file.path); } catch {}
+                    metrics.increment('upload_chunk_client_error', 1);
                     return res.status(403).json({ error: 'No autorizado para esta sesión de subida' });
                 }
                 if (session.status === 'cancelled' || session.status === 'completed') {
                     try { await fsPromises.unlink(req.file.path); } catch {}
+                    metrics.increment('upload_chunk_client_error', 1);
                     return res.status(409).json({ error: 'Sesión de subida no disponible' });
                 }
                 if (Date.now() - session.createdAt > maxUploadAgeMs) {
                     try { await fsPromises.unlink(req.file.path); } catch {}
+                    metrics.increment('upload_chunk_client_error', 1);
                     return res.status(410).json({ error: 'Sesión de subida expirada' });
                 }
                 const delta = Math.max(0, (req.file.size || 0) - (req.existingChunkSize || 0));
@@ -205,6 +210,7 @@ export const createChunkRouter = (options) => {
                         `).get(meta.userId);
                         if ((row?.total || 0) + delta > userLimitBytes) {
                             try { await fsPromises.unlink(req.file.path); } catch {}
+                            metrics.increment('upload_chunk_client_error', 1);
                             return res.status(429).json({ error: 'Límite de subida en progreso excedido' });
                         }
                     } else if (meta.ipFingerprint) {
@@ -215,6 +221,7 @@ export const createChunkRouter = (options) => {
                         `).get(meta.ipFingerprint);
                         if ((row?.total || 0) + delta > guestLimitBytes) {
                             try { await fsPromises.unlink(req.file.path); } catch {}
+                            metrics.increment('upload_chunk_client_error', 1);
                             return res.status(429).json({ error: 'Límite de subida en progreso excedido' });
                         }
                     }
@@ -227,6 +234,7 @@ export const createChunkRouter = (options) => {
             // Validar índice dentro de rango
             if (chunkIndex >= meta.totalChunks) {
                 try { await fsPromises.unlink(req.file.path); } catch {}
+                metrics.increment('upload_chunk_client_error', 1);
                 return res.status(400).json({ error: 'Índice de fragmento fuera de rango' });
             }
             
@@ -234,17 +242,20 @@ export const createChunkRouter = (options) => {
             const isLastChunk = chunkIndex === meta.totalChunks - 1;
             if (!isLastChunk && req.file.size > maxChunkSize * 1.1) {
                 try { await fsPromises.unlink(req.file.path); } catch {}
+                metrics.increment('upload_chunk_client_error', 1);
                 return res.status(400).json({ error: 'Fragmento excede el tamaño máximo permitido' });
             }
             
-            const chunkPath = req.file.path;
+            const tempChunkPath = req.file.path;
+            const finalChunkPath = path.join(CHUNKS_DIR, uploadId, req.chunkFinalName || `${chunkIndex}.part`);
 
             // Disk space safety check (post-write, best-effort)
             try {
                 const { free } = await checkDiskSpace(CHUNKS_DIR);
                 const safetyBytes = 100 * 1024 * 1024; // 100MB safety buffer
                 if (free < req.file.size + safetyBytes) {
-                    try { await fsPromises.unlink(chunkPath); } catch {}
+                    try { await fsPromises.unlink(tempChunkPath); } catch {}
+                    metrics.increment('upload_chunk_server_error', 1);
                     return res.status(507).json({ error: 'Espacio insuficiente en el servidor' });
                 }
             } catch {}
@@ -255,10 +266,18 @@ export const createChunkRouter = (options) => {
                 const totalSize = await getDirectorySize(uploadPath);
                 const maxAllowed = Math.ceil(meta.size * 1.1); // allow small overhead
                 if (totalSize > maxAllowed) {
-                    try { await fsPromises.unlink(chunkPath); } catch {}
+                    try { await fsPromises.unlink(tempChunkPath); } catch {}
+                    metrics.increment('upload_chunk_client_error', 1);
                     return res.status(400).json({ error: 'Tamaño total de subida excedido' });
                 }
             } catch {}
+
+            try {
+                await fsPromises.rename(tempChunkPath, finalChunkPath);
+            } catch (renameError) {
+                try { await fsPromises.unlink(tempChunkPath); } catch {}
+                throw renameError;
+            }
             
             const duration = Date.now() - startTime;
             
@@ -295,7 +314,7 @@ export const createChunkRouter = (options) => {
                 error: err.message,
                 duration: `${Date.now() - startTime}ms`
             });
-            
+            metrics.increment('upload_chunk_server_error', 1);
             return res.status(500).json({ error: 'Error al procesar el fragmento' });
         }
     });

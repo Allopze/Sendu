@@ -61,6 +61,13 @@ const formatBytes = (value) => {
     return `${bytes} B`;
 };
 
+const formatRate = (value) => {
+    if (typeof value !== 'number' || Number.isNaN(value)) {
+        return '-';
+    }
+    return `${Math.round(value * 100)}%`;
+};
+
 const truncateText = (value, maxLen = 120) => {
     const normalized = value === undefined || value === null ? '' : String(value);
     if (normalized.length <= maxLen) {
@@ -1157,6 +1164,11 @@ const AdminPage = () => {
                                         tone: isDark ? 'text-white' : 'text-zinc-900'
                                     },
                                     {
+                                        label: 'Resume Disponible',
+                                        value: formatRate(opsMetrics?.summary?.resumable?.availabilityRate),
+                                        tone: isDark ? 'text-white' : 'text-zinc-900'
+                                    },
+                                    {
                                         label: 'Jobs Muertos',
                                         value: opsMetrics?.queue?.byStatus?.dead ?? 0,
                                         tone: (opsMetrics?.queue?.byStatus?.dead || 0) > 0
@@ -1264,6 +1276,10 @@ const AdminPage = () => {
                                             <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.summary?.http?.serverErrors ?? '-'}</dd>
                                         </div>
                                         <div>
+                                            <dt className={labelClass}>Tasa 5xx</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{formatRate(opsMetrics?.summary?.http?.serverErrorRate)}</dd>
+                                        </div>
+                                        <div>
                                             <dt className={labelClass}>Uploads Iniciados</dt>
                                             <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.summary?.uploads?.started ?? '-'}</dd>
                                         </div>
@@ -1272,14 +1288,77 @@ const AdminPage = () => {
                                             <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.summary?.uploads?.completed ?? '-'}</dd>
                                         </div>
                                         <div>
+                                            <dt className={labelClass}>Tasa de Completion</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{formatRate(opsMetrics?.summary?.uploads?.completionRate)}</dd>
+                                        </div>
+                                        <div>
                                             <dt className={labelClass}>Sesiones Estancadas</dt>
                                             <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.summary?.uploads?.staleSessions ?? '-'}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>Resumes Consultados</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.summary?.resumable?.probes ?? '-'}</dd>
                                         </div>
                                         <div>
                                             <dt className={labelClass}>Queue Pending</dt>
                                             <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{opsMetrics?.queue?.byStatus?.pending ?? 0}</dd>
                                         </div>
+                                        <div>
+                                            <dt className={labelClass}>Chunk 4xx / 5xx</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>
+                                                {(opsMetrics?.summary?.resumable?.chunkClientErrors ?? 0)} / {(opsMetrics?.summary?.resumable?.chunkServerErrors ?? 0)}
+                                            </dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>Descargas OK</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>{formatRate(opsMetrics?.summary?.downloads?.successRate)}</dd>
+                                        </div>
                                     </dl>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                                <div className={`p-5 rounded-2xl ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
+                                    <h3 className={`font-semibold mb-4 ${isDark ? 'text-white' : 'text-zinc-900'}`}>
+                                        SLOs Operativos
+                                    </h3>
+                                    <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+                                        <div>
+                                            <dt className={labelClass}>Uploads</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>
+                                                {formatRate(opsMetrics?.slo?.uploads?.currentCompletionRate)} / objetivo {formatRate(opsMetrics?.slo?.uploads?.targetCompletionRate)}
+                                            </dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>Descargas</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>
+                                                {formatRate(opsMetrics?.slo?.downloads?.currentSuccessRate)} / objetivo {formatRate(opsMetrics?.slo?.downloads?.targetSuccessRate)}
+                                            </dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>Resume</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>
+                                                {formatRate(opsMetrics?.slo?.resumable?.currentAvailabilityRate)} / objetivo {formatRate(opsMetrics?.slo?.resumable?.targetAvailabilityRate)}
+                                            </dd>
+                                        </div>
+                                        <div>
+                                            <dt className={labelClass}>HTTP 5xx</dt>
+                                            <dd className={isDark ? 'text-zinc-200' : 'text-zinc-800'}>
+                                                {formatRate(opsMetrics?.slo?.http?.currentServerErrorRate)} / objetivo {formatRate(opsMetrics?.slo?.http?.targetServerErrorRate)}
+                                            </dd>
+                                        </div>
+                                    </dl>
+                                </div>
+
+                                <div className={`p-5 rounded-2xl ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
+                                    <h3 className={`font-semibold mb-4 ${isDark ? 'text-white' : 'text-zinc-900'}`}>
+                                        Runbook Rápido
+                                    </h3>
+                                    <div className={`space-y-3 text-sm ${isDark ? 'text-zinc-300' : 'text-zinc-700'}`}>
+                                        <p>Si suben `stale_uploads` o cae `resume`, ejecuta limpieza de chunks, revisa espacio libre y valida que `/api/upload/status/:id` responda con chunks completos.</p>
+                                        <p>Si aparecen `chunk_server_errors` o sube el 5xx rate, correlaciona con `requestId` en logs y revisa escritura en `uploads/` y `data/` antes de reabrir tráfico.</p>
+                                        <p>Si caen las descargas exitosas, revalida `/api/download/:id`, límites de contraseña y expiración antes de lanzar un rollback.</p>
+                                    </div>
                                 </div>
                             </div>
                         </div>

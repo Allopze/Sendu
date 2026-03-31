@@ -124,4 +124,46 @@ describe('E2E Upload/Download', () => {
         expect(Buffer.isBuffer(downloadRes.body)).toBe(true);
         expect(downloadRes.body.toString('utf8')).toBe(content.toString('utf8'));
     });
+
+    it('should ignore stale .uploading temp files when resuming a chunked upload', async () => {
+        const content = Buffer.from('resume-check');
+        const agent = request.agent(app);
+
+        const csrfRes = await agent.get('/api/auth/me');
+        let csrfToken = extractCsrfToken(csrfRes);
+
+        const initRes = await agent
+            .post('/api/upload/init')
+            .set('x-csrf-token', csrfToken)
+            .send({
+                originalName: 'resume.txt',
+                size: content.length,
+                mimeType: 'text/plain',
+                totalChunks: 1,
+                chunkSize: content.length
+            });
+
+        csrfToken = extractCsrfToken(initRes) || csrfToken;
+
+        expect(initRes.status).toBe(200);
+        const uploadId = initRes.body.uploadId;
+        const uploadToken = initRes.body.uploadToken;
+        const uploadChunkDir = path.join(uploadsDir, 'chunks', uploadId);
+
+        fs.writeFileSync(path.join(uploadChunkDir, '0.stale.uploading'), content);
+
+        const chunkRes = await agent
+            .post(`/api/upload/chunk?uploadId=${uploadId}&index=0`)
+            .set('x-upload-token', uploadToken)
+            .attach('chunk', content, 'resume.txt');
+
+        expect(chunkRes.status).toBe(200);
+
+        const statusRes = await agent
+            .get(`/api/upload/status/${uploadId}`)
+            .set('x-upload-token', uploadToken);
+
+        expect(statusRes.status).toBe(200);
+        expect(statusRes.body.completedChunks).toEqual([0]);
+    });
 });
