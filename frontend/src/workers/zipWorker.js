@@ -29,10 +29,20 @@ self.onmessage = async (event) => {
 
         for (let i = 0; i < files.length; i += 1) {
             const file = files[i];
-            zip.file(file.path, file.buffer, {
-                binary: true,
+            const source = file.file || file.buffer;
+            if (!source) {
+                throw new Error(`No hay contenido disponible para ${file.path}`);
+            }
+
+            const fileOptions = {
                 date: new Date(file.lastModified || Date.now())
-            });
+            };
+
+            if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) {
+                fileOptions.binary = true;
+            }
+
+            zip.file(file.path, source, fileOptions);
             self.postMessage({
                 type: 'progress',
                 progress: Math.round(((i + 1) / files.length) * 50)

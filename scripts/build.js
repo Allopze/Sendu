@@ -152,14 +152,18 @@ PORT=4000
 
 # Session secret - use a strong random string (min 32 characters)
 # Generate with: openssl rand -hex 32
-SESSION_SECRET=your-super-secret-session-key-change-this
+SESSION_SECRET=__REPLACE_WITH_64_BYTE_HEX__
+
+# Encryption key for SMTP passwords and other sensitive settings
+# Generate with: openssl rand -hex 32
+ENCRYPTION_KEY=__REPLACE_WITH_64_BYTE_HEX__
 
 # Public URL of your application (no trailing slash)
 # This is the primary URL used for email links
-PUBLIC_ORIGIN=https://yourdomain.com
+PUBLIC_ORIGIN=https://sendu.example.com
 
 # Allowed origins for CORS (comma-separated)
-ALLOWED_ORIGINS=https://yourdomain.com
+ALLOWED_ORIGINS=https://sendu.example.com
 
 # ===========================================
 # OPTIONAL SETTINGS
@@ -167,7 +171,7 @@ ALLOWED_ORIGINS=https://yourdomain.com
 
 # Cookie domain for sharing sessions across subdomains (optional)
 # Example: .yourdomain.com
-SESSION_COOKIE_DOMAIN=.yourdomain.com
+SESSION_COOKIE_DOMAIN=
 
 # Custom session cookie name
 SESSION_COOKIE_NAME=sendu.sid
@@ -194,7 +198,7 @@ CSP_STRICT=false
 ALLOW_PUBLIC_REGISTRATION=false
 
 # Bootstrap token for first admin (optional if first-user bootstrap is enabled)
-ADMIN_BOOTSTRAP_TOKEN=your-bootstrap-token
+ADMIN_BOOTSTRAP_TOKEN=__REPLACE_WITH_BOOTSTRAP_TOKEN__
 
 # ===========================================
 # STORAGE PATHS (optional)
@@ -218,9 +222,9 @@ UPLOAD_SESSION_MAX_AGE_HOURS=24
 
 SMTP_HOST=smtp.example.com
 SMTP_PORT=587
-SMTP_USER=your-smtp-username
-SMTP_PASS=your-smtp-password
-SMTP_FROM=noreply@yourdomain.com
+SMTP_USER=__REPLACE_WITH_SMTP_USERNAME__
+SMTP_PASS=__REPLACE_WITH_SMTP_PASSWORD__
+SMTP_FROM=Sendu <no-reply@sendu.example.com>
 `;
 fs.writeFileSync(path.join(distDir, '.env.example'), envExample);
 

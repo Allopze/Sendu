@@ -267,13 +267,13 @@ const HomePage = () => {
             throw new Error('Tu navegador no soporta workers para comprimir archivos grandes');
         }
 
-        const workerFiles = await Promise.all(files.map(async ({ file, path }) => ({
+        const workerFiles = files.map(({ file, path }) => ({
             path,
             name: file.name,
             type: file.type,
             lastModified: file.lastModified,
-            buffer: await file.arrayBuffer()
-        })));
+            file
+        }));
 
         return new Promise((resolve, reject) => {
             zipWorkerRef.current?.terminate();
@@ -309,10 +309,7 @@ const HomePage = () => {
                 reject(new Error(event.message || 'No se pudo iniciar la compresión en background'));
             };
 
-            worker.postMessage(
-                { files: workerFiles },
-                workerFiles.map((item) => item.buffer).filter(Boolean)
-            );
+            worker.postMessage({ files: workerFiles });
         });
     }, []);
 

@@ -55,6 +55,7 @@ Base: /api
 - POST /admin/cleanup-chunks
 - GET /admin/jobs/stats
 - GET /admin/metrics
+- GET /metrics
 - POST /admin/jobs/cleanup
 - POST /admin/rate-limits/reset
 
@@ -74,3 +75,4 @@ Base: /api
 - Las rutas públicas de lectura están exentas de CSRF.
 - `/upload/status/:uploadId` requiere `x-upload-token` o `uploadToken` de la sesión de subida.
 - `/admin/metrics` devuelve `alerts`, `summary` y `slo` para consumo humano o polling externo.
+- `/metrics` expone el mismo estado operativo en formato Prometheus y acepta sesión admin o `Authorization: Bearer <METRICS_EXPORT_TOKEN>`.

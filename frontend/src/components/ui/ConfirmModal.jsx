@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useId, useRef } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
 import { useTheme } from '../../context/ThemeContext';
 
@@ -26,6 +26,8 @@ const ConfirmModal = ({
 }) => {
     const { isDark } = useTheme();
     const modalRef = useRef(null);
+    const titleId = useId();
+    const descriptionId = useId();
 
     // Close on escape key
     useEffect(() => {
@@ -72,6 +74,10 @@ const ConfirmModal = ({
             <div 
                 ref={modalRef}
                 tabIndex={-1}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby={titleId}
+                aria-describedby={descriptionId}
                 className={`rounded-3xl shadow-2xl max-w-md w-full p-6 transform transition-all ${
                     isDark ? 'bg-[#1a1a1a] border border-white/10' : 'bg-white border border-zinc-100'
                 }`}
@@ -83,15 +89,17 @@ const ConfirmModal = ({
                         <AlertTriangle size={24} />
                     </div>
                     <div className="flex-1 min-w-0">
-                        <h3 className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-zinc-900'}`}>
+                        <h3 id={titleId} className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-zinc-900'}`}>
                             {title}
                         </h3>
-                        <p className={`mt-2 text-sm break-words overflow-hidden ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>
+                        <p id={descriptionId} className={`mt-2 text-sm break-words overflow-hidden ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>
                             {message}
                         </p>
                     </div>
                     <button
+                        type="button"
                         onClick={onClose}
+                        aria-label="Cerrar modal"
                         className={`p-1 rounded-lg transition-colors ${
                             isDark ? 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100'
                         }`}
@@ -103,6 +111,7 @@ const ConfirmModal = ({
                 {/* Actions */}
                 <div className="mt-6 flex gap-3 justify-end">
                     <button
+                        type="button"
                         onClick={onClose}
                         className={`px-4 py-2 text-sm font-medium rounded-xl transition-colors ${
                             isDark ? 'text-zinc-300 bg-zinc-800 hover:bg-zinc-700' : 'text-zinc-700 bg-zinc-100 hover:bg-zinc-200'
@@ -111,6 +120,7 @@ const ConfirmModal = ({
                         {cancelText}
                     </button>
                     <button
+                        type="button"
                         onClick={handleConfirm}
                         className={`px-4 py-2 text-sm font-medium text-white rounded-xl transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 ${variantStyles[variant]}`}
                     >

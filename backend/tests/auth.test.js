@@ -18,6 +18,24 @@ const testDbPath = path.join(__dirname, '..', '..', 'data', 'test.sqlite');
 let db;
 let app;
 let startServer;
+const SMTP_ENV_KEYS = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'];
+const originalSmtpEnv = Object.fromEntries(SMTP_ENV_KEYS.map((key) => [key, process.env[key]]));
+
+const clearSmtpEnv = () => {
+    for (const key of SMTP_ENV_KEYS) {
+        delete process.env[key];
+    }
+};
+
+const restoreSmtpEnv = () => {
+    for (const key of SMTP_ENV_KEYS) {
+        if (originalSmtpEnv[key] === undefined) {
+            delete process.env[key];
+            continue;
+        }
+        process.env[key] = originalSmtpEnv[key];
+    }
+};
 
 const extractCsrfToken = (response) => {
     const cookies = response.headers['set-cookie'] || [];
@@ -36,6 +54,7 @@ describe('Auth API', () => {
     });
 
     afterAll(() => {
+        restoreSmtpEnv();
         stopJobProcessor();
         if (db && db.close) {
             db.close();
@@ -50,6 +69,8 @@ describe('Auth API', () => {
         // Clear users table before each test
         db.exec('DELETE FROM files');
         db.exec('DELETE FROM users');
+        db.exec("DELETE FROM settings WHERE key LIKE 'smtp%'");
+        clearSmtpEnv();
     });
 
     describe('POST /api/auth/register', () => {
@@ -328,6 +349,21 @@ describe('Auth API', () => {
             const user = db.prepare('SELECT isVerified, verificationToken FROM users WHERE id = ?').get(userId);
             expect(user.isVerified).toBe(1);
             expect(user.verificationToken).toBeNull();
+        });
+
+        it('should allow forgot password flow when SMTP is configured via environment', async () => {
+            process.env.SMTP_HOST = 'smtp.example.com';
+            process.env.SMTP_PORT = '587';
+            process.env.SMTP_USER = 'mailer@example.com';
+            process.env.SMTP_PASS = 'env-secret';
+            process.env.SMTP_FROM = 'ops@example.com';
+
+            const res = await request(app)
+                .post('/api/auth/forgot-password')
+                .send({ email: 'missing@example.com' });
+
+            expect(res.status).toBe(200);
+            expect(res.body.message).toContain('Si el email existe');
         });
     });
 

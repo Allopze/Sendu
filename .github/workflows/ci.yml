@@ -21,8 +21,8 @@ jobs:
       - name: Install backend dependencies
         run: npm ci
 
-      - name: Backend tests
-        run: npm run test
+      - name: Backend tests with coverage
+        run: npm run test:coverage
 
       - name: Backend audit
         run: npm audit --omit=dev
@@ -35,6 +35,12 @@ jobs:
 
       - name: Frontend build
         run: npm run build --prefix frontend
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright smoke
+        run: npm run test:e2e:smoke
 
       - name: Frontend audit
         run: npm audit --omit=dev --prefix frontend

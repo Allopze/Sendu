@@ -7,6 +7,11 @@ export default defineConfig({
         include: ['backend/tests/**/*.test.js'],
         exclude: ['node_modules', 'frontend'],
         testTimeout: 10000,
-        hookTimeout: 10000
+        hookTimeout: 10000,
+        coverage: {
+            provider: 'v8',
+            reporter: ['text', 'lcov'],
+            reportsDirectory: './coverage'
+        }
     }
 });

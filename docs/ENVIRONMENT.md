@@ -7,6 +7,7 @@ Sendu carga variables desde .env (dotenv) en el backend y el frontend durante de
 | Variable | Requerida | Descripción |
 | --- | --- | --- |
 | SESSION_SECRET | Sí | Secreto de sesión (mínimo 32 caracteres). |
+| ENCRYPTION_KEY | No | Clave separada para cifrar settings sensibles. Si no se define, se usa `SESSION_SECRET`, pero en producción conviene separarla. |
 | PUBLIC_ORIGIN | Sí | URL pública de la app sin slash final (debe ser HTTPS para cookies seguras). |
 | ALLOWED_ORIGINS | Sí | Lista separada por comas con orígenes permitidos para CORS. Debe incluir PUBLIC_ORIGIN. |
 
@@ -20,6 +21,7 @@ Sendu carga variables desde .env (dotenv) en el backend y el frontend durante de
 | SESSION_COOKIE_SECURE | No | Secure para cookie de sesión (true/false). Por defecto true en producción. **IMPORTANTE**: Si usas HTTP (no HTTPS), debes poner `false`, pero esto NO es recomendado en producción. |
 | TRUST_PROXY | No | Habilita trust proxy (por defecto 1 en producción). Necesario si hay un reverse proxy (nginx, Cloudflare, etc.) delante de la app. |
 | CSP_STRICT | No | `true` para activar Content Security Policy estricta. Elimina `'unsafe-inline'` de las directivas `script-src` y `style-src` en las cabeceras CSP. **Nota:** puede romper estilos inline de React; prueba en staging antes de activar en producción. Si usas Cloudflare Analytics, la directiva ya incluye `cloudflareinsights.com`. |
+| METRICS_EXPORT_TOKEN | No | Token opcional para exponer `GET /metrics` a scrapers externos sin sesión admin. Usa `Authorization: Bearer <token>`. |
 
 ## Problema común: Sesión se pierde al refrescar
 
@@ -69,7 +71,25 @@ Si la sesión se cierra al refrescar la página, verifica:
 
 ## SMTP
 
-La configuración SMTP se guarda en la base de datos desde el panel Admin (no desde .env). En .env.example aparecen valores de referencia para despliegues y releases.
+Sendu ahora resuelve SMTP con esta prioridad:
+
+1. Variables de entorno `SMTP_*` como base de despliegue.
+2. Valores guardados desde el panel Admin como override sobre esa base.
+
+Esto permite despliegues reproducibles desde `.env` y, si hace falta, ajustes posteriores desde el panel sin romper la configuración existente. El endpoint `GET /api/admin/settings` devuelve el merge efectivo para que la UI refleje la configuración real sin exponer la contraseña.
+
+Variables soportadas:
+
+| Variable | Requerida | Descripción |
+| --- | --- | --- |
+| SMTP_HOST | No | Host SMTP. |
+| SMTP_PORT | No | Puerto SMTP. Por defecto 587 si hay configuración SMTP parcial. |
+| SMTP_SECURE | No | `true` o `false`. Si no se define, se infiere desde `SMTP_PORT` (465 => `true`). |
+| SMTP_USER | No | Usuario SMTP. |
+| SMTP_PASS | No | Contraseña SMTP. |
+| SMTP_FROM | No | Remitente por defecto. |
+
+Si prefieres no depender del panel Admin, deja toda la configuración en `.env`. Si prefieres administración en caliente, guarda overrides desde el panel una vez desplegado.
 
 ## Rate limiting (nota)
 
@@ -77,4 +97,4 @@ Los contadores de rate limit se guardan en SQLite (tabla `rate_limits`). En desp
 
 ## Ejemplo
 
-Revisa .env.example para un ejemplo completo.
+Revisa .env.example para un ejemplo completo. La plantilla del repositorio solo contiene placeholders y ejemplos sintéticos: no debe usarse sin reemplazarlos por valores reales.

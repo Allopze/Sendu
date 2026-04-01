@@ -16,11 +16,14 @@ Plataforma de intercambio de archivos con subidas en chunks, enlaces protegidos,
 
 ## Inicio rápido (desarrollo)
 
-1) Copia la plantilla de entorno y ajusta valores:
+1) Copia la plantilla de entorno, genera secretos nuevos y reemplaza todos los placeholders:
 
 ```
 cp .env.example .env
+openssl rand -hex 64
 ```
+
+Usa el valor generado para `SESSION_SECRET` y, preferiblemente, otro distinto para `ENCRYPTION_KEY`. `PUBLIC_ORIGIN` debe ser una sola URL pública válida.
 
 2) Instala dependencias:
 
@@ -39,7 +42,7 @@ npm run dev
 
 ## Producción (Docker)
 
-Usa docker-compose y un archivo .env con los valores requeridos. Ver guía completa en docs/DEPLOYMENT.md.
+Usa docker-compose y un archivo .env con placeholders reemplazados por valores reales. Ver guía completa en docs/DEPLOYMENT.md.
 
 ## Scripts principales
 

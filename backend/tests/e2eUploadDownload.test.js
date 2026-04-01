@@ -166,4 +166,126 @@ describe('E2E Upload/Download', () => {
         expect(statusRes.status).toBe(200);
         expect(statusRes.body.completedChunks).toEqual([0]);
     });
+
+    it('should not contaminate bytesReceived when a chunk fails validation', async () => {
+        const content = Buffer.from('quota-check');
+        const agent = request.agent(app);
+
+        const csrfRes = await agent.get('/api/auth/me');
+        let csrfToken = extractCsrfToken(csrfRes);
+
+        const initRes = await agent
+            .post('/api/upload/init')
+            .set('x-csrf-token', csrfToken)
+            .send({
+                originalName: 'quota.txt',
+                size: content.length,
+                mimeType: 'text/plain',
+                totalChunks: 1,
+                chunkSize: content.length
+            });
+
+        csrfToken = extractCsrfToken(initRes) || csrfToken;
+
+        expect(initRes.status).toBe(200);
+
+        const uploadId = initRes.body.uploadId;
+        const uploadToken = initRes.body.uploadToken;
+
+        const invalidChunkRes = await agent
+            .post(`/api/upload/chunk?uploadId=${uploadId}&index=1`)
+            .set('x-upload-token', uploadToken)
+            .attach('chunk', content, 'quota.txt');
+
+        expect(invalidChunkRes.status).toBe(400);
+
+        const uploadSession = db.prepare('SELECT bytesReceived FROM upload_sessions WHERE uploadId = ?').get(uploadId);
+        expect(uploadSession.bytesReceived).toBe(0);
+
+        const validChunkRes = await agent
+            .post(`/api/upload/chunk?uploadId=${uploadId}&index=0`)
+            .set('x-upload-token', uploadToken)
+            .attach('chunk', content, 'quota.txt');
+
+        expect(validChunkRes.status).toBe(200);
+
+        const updatedSession = db.prepare('SELECT bytesReceived FROM upload_sessions WHERE uploadId = ?').get(uploadId);
+        expect(updatedSession.bytesReceived).toBe(content.length);
+    });
+
+    it('should complete a multi-chunk upload and preserve progress across resumable status checks', async () => {
+        const chunkA = Buffer.alloc(256 * 1024, 'a');
+        const chunkB = Buffer.alloc(256 * 1024, 'b');
+        const chunkC = Buffer.alloc(128 * 1024, 'c');
+        const content = Buffer.concat([chunkA, chunkB, chunkC]);
+        const agent = request.agent(app);
+
+        const csrfRes = await agent.get('/api/auth/me');
+        let csrfToken = extractCsrfToken(csrfRes);
+
+        const initRes = await agent
+            .post('/api/upload/init')
+            .set('x-csrf-token', csrfToken)
+            .send({
+                originalName: 'large.txt',
+                size: content.length,
+                mimeType: 'text/plain',
+                totalChunks: 3,
+                chunkSize: chunkA.length
+            });
+
+        expect(initRes.status).toBe(200);
+        csrfToken = extractCsrfToken(initRes) || csrfToken;
+
+        const uploadId = initRes.body.uploadId;
+        const uploadToken = initRes.body.uploadToken;
+
+        const firstChunkRes = await agent
+            .post(`/api/upload/chunk?uploadId=${uploadId}&index=0`)
+            .set('x-upload-token', uploadToken)
+            .attach('chunk', chunkA, 'large.txt.part0');
+
+        expect(firstChunkRes.status).toBe(200);
+
+        const partialStatusRes = await agent
+            .get(`/api/upload/status/${uploadId}`)
+            .set('x-upload-token', uploadToken);
+
+        expect(partialStatusRes.status).toBe(200);
+        expect(partialStatusRes.body.completedChunks).toEqual([0]);
+
+        const [secondChunkRes, thirdChunkRes] = await Promise.all([
+            agent
+                .post(`/api/upload/chunk?uploadId=${uploadId}&index=1`)
+                .set('x-upload-token', uploadToken)
+                .attach('chunk', chunkB, 'large.txt.part1'),
+            agent
+                .post(`/api/upload/chunk?uploadId=${uploadId}&index=2`)
+                .set('x-upload-token', uploadToken)
+                .attach('chunk', chunkC, 'large.txt.part2')
+        ]);
+
+        expect(secondChunkRes.status).toBe(200);
+        expect(thirdChunkRes.status).toBe(200);
+
+        const completeRes = await agent
+            .post('/api/upload/complete')
+            .set('x-csrf-token', csrfToken)
+            .send({ uploadId });
+
+        expect(completeRes.status).toBe(200);
+
+        const downloadRes = await agent
+            .get(`/api/download/${completeRes.body.fileId}`)
+            .buffer(true)
+            .parse((res, cb) => {
+                const data = [];
+                res.on('data', (chunk) => data.push(chunk));
+                res.on('end', () => cb(null, Buffer.concat(data)));
+            });
+
+        expect(downloadRes.status).toBe(200);
+        expect(downloadRes.body.length).toBe(content.length);
+        expect(downloadRes.body.equals(content)).toBe(true);
+    });
 });

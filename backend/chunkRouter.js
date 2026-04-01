@@ -163,11 +163,33 @@ export const createChunkRouter = (options) => {
         try {
             // Obtener meta (cacheado)
             const { meta, maxChunkSize } = await getUploadMeta(uploadId);
+            const uploadPath = path.join(CHUNKS_DIR, uploadId);
+            const tempChunkPath = req.file.path;
+            const finalChunkPath = path.join(uploadPath, req.chunkFinalName || `${chunkIndex}.part`);
+
+            // Validar índice dentro de rango antes de tocar contadores persistidos
+            if (chunkIndex >= meta.totalChunks) {
+                try { await fsPromises.unlink(tempChunkPath); } catch {}
+                metrics.increment('upload_chunk_client_error', 1);
+                return res.status(400).json({ error: 'Índice de fragmento fuera de rango' });
+            }
+
+            // Validar tamaño del chunk antes de tocar contadores persistidos
+            const isLastChunk = chunkIndex === meta.totalChunks - 1;
+            if (!isLastChunk && req.file.size > maxChunkSize * 1.1) {
+                try { await fsPromises.unlink(tempChunkPath); } catch {}
+                metrics.increment('upload_chunk_client_error', 1);
+                return res.status(400).json({ error: 'Fragmento excede el tamaño máximo permitido' });
+            }
+
+            const authoritativeBytesBefore = await getDirectorySize(uploadPath);
+            const delta = (req.file.size || 0) - (req.existingChunkSize || 0);
+            const projectedBytes = authoritativeBytesBefore + delta;
 
             // Validate upload session state (DB-backed)
             const db = typeof getDb === 'function' ? getDb() : null;
             if (db) {
-                const session = db.prepare('SELECT status, createdAt, userId, ipFingerprint FROM upload_sessions WHERE uploadId = ?').get(uploadId);
+                const session = db.prepare('SELECT status, createdAt, userId, ipFingerprint, bytesReceived FROM upload_sessions WHERE uploadId = ?').get(uploadId);
                 if (!session) {
                     try { await fsPromises.unlink(req.file.path); } catch {}
                     metrics.increment('upload_chunk_client_error', 1);
@@ -194,13 +216,13 @@ export const createChunkRouter = (options) => {
                     metrics.increment('upload_chunk_client_error', 1);
                     return res.status(410).json({ error: 'Sesión de subida expirada' });
                 }
-                const delta = Math.max(0, (req.file.size || 0) - (req.existingChunkSize || 0));
 
                 // Enforce in-progress quota per user/IP
                 if (typeof getUploadLimits === 'function') {
                     const limits = getUploadLimits();
                     const guestLimitBytes = limits.guestUploadLimit * 1024 * 1024;
                     const userLimitBytes = limits.maxTotalSize * 1024 * 1024;
+                    const currentSessionBytes = Number(session.bytesReceived) || 0;
 
                     if (meta.userId) {
                         const row = db.prepare(`
@@ -208,7 +230,8 @@ export const createChunkRouter = (options) => {
                             FROM upload_sessions
                             WHERE userId = ? AND status IN ('initiated','processing')
                         `).get(meta.userId);
-                        if ((row?.total || 0) + delta > userLimitBytes) {
+                        const projectedUserTotal = Math.max(0, (row?.total || 0) - currentSessionBytes + projectedBytes);
+                        if (projectedUserTotal > userLimitBytes) {
                             try { await fsPromises.unlink(req.file.path); } catch {}
                             metrics.increment('upload_chunk_client_error', 1);
                             return res.status(429).json({ error: 'Límite de subida en progreso excedido' });
@@ -219,35 +242,15 @@ export const createChunkRouter = (options) => {
                             FROM upload_sessions
                             WHERE ipFingerprint = ? AND status IN ('initiated','processing')
                         `).get(meta.ipFingerprint);
-                        if ((row?.total || 0) + delta > guestLimitBytes) {
+                        const projectedGuestTotal = Math.max(0, (row?.total || 0) - currentSessionBytes + projectedBytes);
+                        if (projectedGuestTotal > guestLimitBytes) {
                             try { await fsPromises.unlink(req.file.path); } catch {}
                             metrics.increment('upload_chunk_client_error', 1);
                             return res.status(429).json({ error: 'Límite de subida en progreso excedido' });
                         }
                     }
                 }
-
-                db.prepare('UPDATE upload_sessions SET bytesReceived = bytesReceived + ?, updatedAt = ? WHERE uploadId = ?')
-                    .run(delta, Date.now(), uploadId);
             }
-            
-            // Validar índice dentro de rango
-            if (chunkIndex >= meta.totalChunks) {
-                try { await fsPromises.unlink(req.file.path); } catch {}
-                metrics.increment('upload_chunk_client_error', 1);
-                return res.status(400).json({ error: 'Índice de fragmento fuera de rango' });
-            }
-            
-            // Validar tamaño del chunk
-            const isLastChunk = chunkIndex === meta.totalChunks - 1;
-            if (!isLastChunk && req.file.size > maxChunkSize * 1.1) {
-                try { await fsPromises.unlink(req.file.path); } catch {}
-                metrics.increment('upload_chunk_client_error', 1);
-                return res.status(400).json({ error: 'Fragmento excede el tamaño máximo permitido' });
-            }
-            
-            const tempChunkPath = req.file.path;
-            const finalChunkPath = path.join(CHUNKS_DIR, uploadId, req.chunkFinalName || `${chunkIndex}.part`);
 
             // Disk space safety check (post-write, best-effort)
             try {
@@ -262,10 +265,8 @@ export const createChunkRouter = (options) => {
 
             // Enforce total size per uploadId (prevent disk abuse)
             try {
-                const uploadPath = path.join(CHUNKS_DIR, uploadId);
-                const totalSize = await getDirectorySize(uploadPath);
                 const maxAllowed = Math.ceil(meta.size * 1.1); // allow small overhead
-                if (totalSize > maxAllowed) {
+                if (projectedBytes > maxAllowed) {
                     try { await fsPromises.unlink(tempChunkPath); } catch {}
                     metrics.increment('upload_chunk_client_error', 1);
                     return res.status(400).json({ error: 'Tamaño total de subida excedido' });
@@ -277,6 +278,12 @@ export const createChunkRouter = (options) => {
             } catch (renameError) {
                 try { await fsPromises.unlink(tempChunkPath); } catch {}
                 throw renameError;
+            }
+
+            if (db) {
+                const authoritativeBytes = await getDirectorySize(uploadPath);
+                db.prepare('UPDATE upload_sessions SET bytesReceived = ?, updatedAt = ? WHERE uploadId = ?')
+                    .run(authoritativeBytes, Date.now(), uploadId);
             }
             
             const duration = Date.now() - startTime;

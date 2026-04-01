@@ -36,6 +36,20 @@ import { metrics } from './lib/metrics.js';
 import { runMigrations } from './lib/migrations.js';
 import { antivirus } from './lib/antivirus.js';
 import { createUploadSessionToken, validateUploadSessionToken } from './lib/uploadSessionToken.js';
+import {
+    applyAdminSettings,
+    serializeAdminSettings,
+    validateAdminSettingsPayload,
+} from './lib/adminSettings.js';
+import {
+    buildOperationalMetrics,
+    serializeOperationalMetricsPrometheus,
+} from './lib/operationalMetrics.js';
+import {
+    getSmtpEnvironmentConfig,
+    mergeSmtpConfig,
+    mergeSmtpIntoSettings,
+} from './lib/smtpConfig.js';
 
 dotenv.config();
 
@@ -58,6 +72,7 @@ if (process.env.NODE_ENV === 'production' && !process.env.PUBLIC_ORIGIN) {
 const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || 'http://localhost:5174';
 const ALLOW_PUBLIC_REGISTRATION = process.env.ALLOW_PUBLIC_REGISTRATION === 'true';
 const ADMIN_BOOTSTRAP_TOKEN = process.env.ADMIN_BOOTSTRAP_TOKEN || null;
+const METRICS_EXPORT_TOKEN = process.env.METRICS_EXPORT_TOKEN || '';
 // Support multiple origins (comma-separated in env var)
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
     ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
@@ -75,8 +90,6 @@ const isLoopbackOrigin = (() => {
 const isTest = process.env.NODE_ENV === 'test';
 const PASSWORD_MIN_LENGTH = 8;
 const PASSWORD_POLICY_MESSAGE = `La contraseña debe tener al menos ${PASSWORD_MIN_LENGTH} caracteres, incluyendo letras y números`;
-const SETTINGS_AUDIT_REDACTED = '[REDACTED]';
-const SENSITIVE_SETTINGS_KEYS = new Set(['smtpPass']);
 
 const requestUsesSecureCookies = (req) => {
     if (!req) return false;
@@ -615,18 +628,23 @@ const ensureDefaultBrandingSettings = () => {
 
 // Helper: Get SMTP config from settings (with decryption for sensitive fields)
 const getSmtpConfig = () => {
+    const envConfig = getSmtpEnvironmentConfig();
+    if (!db) {
+        return envConfig;
+    }
+
     const settings = db.prepare('SELECT key, value FROM settings WHERE key LIKE ?').all('smtp%');
-    const config = {};
+    const storedConfig = {};
     const sensitiveKeys = ['smtpPass'];
     settings.forEach(s => {
         // Decrypt sensitive values
         if (sensitiveKeys.includes(s.key) && isEncrypted(s.value)) {
-            config[s.key] = decrypt(s.value);
+            storedConfig[s.key] = decrypt(s.value);
         } else {
-            config[s.key] = s.value;
+            storedConfig[s.key] = s.value;
         }
     });
-    return config;
+    return mergeSmtpConfig(envConfig, storedConfig);
 };
 
 const isEmailDeliveryEnabled = () => {
@@ -699,9 +717,14 @@ const createSmtpTransporter = () => {
     }
 
     const port = parseInt(config.smtpPort) || 587;
+    const explicitSecure = typeof config.smtpSecure === 'string'
+        ? config.smtpSecure.trim().toLowerCase()
+        : '';
     // Puerto 465 usa SSL directo (secure: true)
     // Puerto 587 usa STARTTLS (secure: false, pero TLS se negocia)
-    const secure = port === 465;
+    const secure = explicitSecure
+        ? explicitSecure === 'true'
+        : port === 465;
 
     return nodemailer.createTransport({
         host: config.smtpHost,
@@ -2192,6 +2215,50 @@ const requireAdmin = (req, res, next) => {
     next();
 };
 
+const hasAdminSession = (req) => {
+    if (!req.session?.userId) {
+        return false;
+    }
+
+    const stmt = db.prepare('SELECT role FROM users WHERE id = ?');
+    const user = stmt.get(req.session.userId);
+    return Boolean(user && user.role === 'admin');
+};
+
+const getMetricsRequestToken = (req) => {
+    const authHeader = req.get('authorization');
+    if (authHeader) {
+        const match = authHeader.match(/^Bearer\s+(.+)$/i);
+        if (match?.[1]) {
+            return match[1].trim();
+        }
+    }
+
+    const headerToken = req.get('x-metrics-token');
+    if (headerToken) {
+        return headerToken.trim();
+    }
+
+    if (typeof req.query?.token === 'string') {
+        return req.query.token.trim();
+    }
+
+    return '';
+};
+
+const canAccessExportedMetrics = (req) => {
+    if (hasAdminSession(req)) {
+        return true;
+    }
+
+    const providedToken = getMetricsRequestToken(req);
+    if (!METRICS_EXPORT_TOKEN || !providedToken) {
+        return false;
+    }
+
+    return safeCompare(providedToken, METRICS_EXPORT_TOKEN);
+};
+
 app.get('/api/admin/stats', requireAdmin, (req, res) => {
     const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
     const fileCount = db.prepare('SELECT COUNT(*) as count FROM files').get().count;
@@ -2438,43 +2505,10 @@ app.get('/api/admin/files', requireAdmin, (req, res) => {
     });
 });
 
-const stringifySettingValue = (value) => {
-    if (value === undefined || value === null) {
-        return '';
-    }
-    return String(value);
-};
-
-const sanitizeSettingAuditValue = (key, value) => {
-    if (SENSITIVE_SETTINGS_KEYS.has(key)) {
-        return value ? SETTINGS_AUDIT_REDACTED : '';
-    }
-    const normalized = value === undefined || value === null ? '' : String(value);
-    const MAX_AUDIT_VALUE_LEN = 2000;
-    if (normalized.length > MAX_AUDIT_VALUE_LEN) {
-        return `${normalized.slice(0, MAX_AUDIT_VALUE_LEN)}...[truncated]`;
-    }
-    return normalized;
-};
-
 app.get('/api/admin/settings', requireAdmin, (req, res) => {
     const settings = db.prepare('SELECT key, value FROM settings').all();
-    const settingsMap = {};
-
-    settings.forEach((setting) => {
-        if (SENSITIVE_SETTINGS_KEYS.has(setting.key)) {
-            settingsMap[setting.key] = '';
-            settingsMap.smtpPassConfigured = Boolean(setting.value);
-            return;
-        }
-        settingsMap[setting.key] = setting.value;
-    });
-
-    if (settingsMap.smtpPassConfigured === undefined) {
-        settingsMap.smtpPassConfigured = false;
-    }
-
-    res.json(settingsMap);
+    const serializedSettings = serializeAdminSettings(settings);
+    res.json(mergeSmtpIntoSettings(serializedSettings, getSmtpEnvironmentConfig()));
 });
 
 app.get('/api/admin/settings/audit', requireAdmin, (req, res) => {
@@ -2522,84 +2556,21 @@ app.post('/api/admin/rate-limits/reset', requireAdmin, (req, res) => {
 
 app.post('/api/admin/settings', requireAdmin, (req, res) => {
     const settings = req.body;
-
-    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
-        return res.status(400).json({ error: 'Payload de configuracion invalido' });
+    const validationError = validateAdminSettingsPayload(settings);
+    if (validationError) {
+        return res.status(400).json({ error: validationError });
     }
-
-    // Allowlist of valid settings keys (prevents arbitrary key injection)
-    const ALLOWED_SETTINGS_KEYS = new Set([
-        'logoLight', 'logoDark', 'logoLightEmail', 'logoDarkEmail',
-        'favicon', 'dropzoneIcon', 'footerText',
-        'smtpHost', 'smtpPort', 'smtpSecure', 'smtpUser', 'smtpPass', 'smtpFrom',
-        'maxFileSize', 'maxTotalSize', 'guestUploadLimit', 'guestMaxFileSize', 'chunkSize',
-        'maxConcurrentUploads', 'chunkRateLimit', 'adaptiveChunkSizing',
-        'smallFileThreshold', 'mediumFileThreshold', 'smallFileChunkSize',
-        'mediumFileChunkSize', 'largeFileChunkSize', 'emailTemplates',
-        'defaultRetentionDays'
-    ]);
-
-    // Reject unknown keys
-    const unknownKeys = Object.keys(settings).filter(k => !ALLOWED_SETTINGS_KEYS.has(k));
-    if (unknownKeys.length > 0) {
-        return res.status(400).json({ error: `Claves de configuración no permitidas: ${unknownKeys.join(', ')}` });
-    }
-
-    const getCurrentStmt = db.prepare('SELECT value FROM settings WHERE key = ?');
-    const upsertStmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
-    const auditStmt = db.prepare(`
-        INSERT INTO settings_audit_log (adminUserId, settingKey, oldValue, newValue, changedAt)
-        VALUES (?, ?, ?, ?, ?)
-    `);
-
-    const applySettings = db.transaction((incomingSettings, adminUserId) => {
-        const now = Date.now();
-        const changedKeys = [];
-
-        for (const [key, rawValue] of Object.entries(incomingSettings)) {
-            const existingValue = getCurrentStmt.get(key)?.value ?? null;
-            let finalValue = null;
-
-            if (SENSITIVE_SETTINGS_KEYS.has(key)) {
-                const submittedSecret = typeof rawValue === 'string' ? rawValue.trim() : '';
-
-                // Empty values mean "keep existing secret" to avoid accidental secret deletion.
-                if (!submittedSecret) {
-                    continue;
-                }
-
-                const existingSecret = existingValue
-                    ? (isEncrypted(existingValue) ? decrypt(existingValue) : existingValue)
-                    : '';
-
-                if (existingSecret && safeCompare(existingSecret, submittedSecret)) {
-                    continue;
-                }
-
-                finalValue = isEncrypted(submittedSecret) ? submittedSecret : encrypt(submittedSecret);
-            } else {
-                finalValue = stringifySettingValue(rawValue);
-                if (existingValue === finalValue) {
-                    continue;
-                }
-            }
-
-            upsertStmt.run(key, finalValue);
-            auditStmt.run(
-                adminUserId,
-                key,
-                sanitizeSettingAuditValue(key, existingValue),
-                sanitizeSettingAuditValue(key, finalValue),
-                now
-            );
-            changedKeys.push(key);
-        }
-
-        return changedKeys;
-    });
 
     try {
-        const changedKeys = applySettings(settings, req.session.userId || 'unknown');
+        const changedKeys = applyAdminSettings({
+            db,
+            settings,
+            adminUserId: req.session.userId || 'unknown',
+            safeCompare,
+            encrypt,
+            decrypt,
+            isEncrypted,
+        });
 
         // Invalidate cache so new values take effect immediately
         if (changedKeys.length > 0) {
@@ -3206,186 +3177,38 @@ app.post('/api/admin/jobs/:id/cancel', requireAdmin, asyncHandler(async (req, re
 
 // Admin endpoint for basic operational metrics
 app.get('/api/admin/metrics', requireAdmin, asyncHandler(async (req, res) => {
-    let disk = null;
-    let uploadsWritable = false;
-    let dataWritable = false;
-    let dbOk = false;
-    try {
-        disk = await checkDiskSpace(UPLOAD_DIR);
-    } catch { }
-    try {
-        db.prepare('SELECT 1').get();
-        dbOk = true;
-    } catch { }
-    try {
-        await fsPromises.access(UPLOAD_DIR, fs.constants.W_OK);
-        uploadsWritable = true;
-    } catch { }
-    try {
-        await fsPromises.access(dataDir, fs.constants.W_OK);
-        dataWritable = true;
-    } catch { }
-    const queue = getQueueStats();
-    const snapshot = metrics.getSnapshot();
-    const counters = snapshot.counters || {};
-    const totalUploadsStarted = counters.upload_init || 0;
-    const totalUploadsCompleted = counters.upload_complete || 0;
-    const totalUploadsCancelled = counters.upload_cancel || 0;
-    const totalDownloadsStarted = counters.download_start || 0;
-    const totalDownloadsCompleted = counters.download_complete || 0;
-    const totalDownloadsFailed = (counters.download_fail || 0) + (counters.download_abort || 0);
-    const totalResumeProbes = counters.upload_resume_probe || 0;
-    const totalResumeAvailable = counters.upload_resume_available || 0;
-    const totalChunkClientErrors = counters.upload_chunk_client_error || 0;
-    const totalChunkServerErrors = counters.upload_chunk_server_error || 0;
-    const totalHttpRequests = (counters.http_2xx || 0) + (counters.http_4xx || 0) + (counters.http_5xx || 0);
-    const uploadCompletionRate = totalUploadsStarted > 0 ? totalUploadsCompleted / totalUploadsStarted : null;
-    const downloadSuccessRate = totalDownloadsStarted > 0 ? totalDownloadsCompleted / totalDownloadsStarted : null;
-    const resumeAvailabilityRate = totalResumeProbes > 0 ? totalResumeAvailable / totalResumeProbes : null;
-    const httpServerErrorRate = totalHttpRequests > 0 ? (counters.http_5xx || 0) / totalHttpRequests : null;
-    const activeUploads = db.prepare(`
-        SELECT COUNT(*) as total
-        FROM upload_sessions
-        WHERE status IN ('initiated', 'processing')
-    `).get()?.total || 0;
-    const staleUploads = db.prepare(`
-        SELECT COUNT(*) as total
-        FROM upload_sessions
-        WHERE status IN ('initiated', 'processing') AND updatedAt < ?
-    `).get(Date.now() - (15 * 60 * 1000))?.total || 0;
-    const diskFreePercent = disk?.size ? (disk.free / disk.size) : null;
-    const alerts = [];
-
-    if (!dbOk || !uploadsWritable || !dataWritable) {
-        alerts.push({
-            code: 'readiness_degraded',
-            severity: 'high',
-            message: 'Alguna dependencia critica no esta lista para escribir en produccion.'
-        });
-    }
-    if (typeof diskFreePercent === 'number' && diskFreePercent < 0.15) {
-        alerts.push({
-            code: 'disk_low',
-            severity: diskFreePercent < 0.08 ? 'high' : 'medium',
-            message: `Espacio libre bajo en uploads (${Math.round(diskFreePercent * 100)}%).`
-        });
-    }
-    if ((queue.byStatus?.dead || 0) > 0) {
-        alerts.push({
-            code: 'jobs_dead',
-            severity: 'high',
-            message: `Hay ${queue.byStatus.dead} jobs en dead-letter queue.`
-        });
-    }
-    if ((counters.http_5xx || 0) > 0) {
-        alerts.push({
-            code: 'http_5xx_seen',
-            severity: 'medium',
-            message: `Se registraron ${counters.http_5xx} respuestas 5xx desde el ultimo arranque.`
-        });
-    }
-    if (staleUploads > 0) {
-        alerts.push({
-            code: 'stale_uploads',
-            severity: 'medium',
-            message: `Hay ${staleUploads} subidas activas sin actividad reciente.`
-        });
-    }
-    if (typeof resumeAvailabilityRate === 'number' && totalResumeProbes >= 3 && resumeAvailabilityRate < 0.6) {
-        alerts.push({
-            code: 'resume_recovery_degraded',
-            severity: 'medium',
-            message: `La reanudación solo recuperó ${Math.round(resumeAvailabilityRate * 100)}% de las sesiones consultadas desde el último arranque.`
-        });
-    }
-    if (totalChunkServerErrors > 0) {
-        alerts.push({
-            code: 'chunk_server_errors',
-            severity: 'high',
-            message: `Se registraron ${totalChunkServerErrors} errores 5xx procesando fragmentos de subida.`
-        });
-    }
-    if (typeof downloadSuccessRate === 'number' && totalDownloadsStarted >= 5 && downloadSuccessRate < 0.9) {
-        alerts.push({
-            code: 'download_success_rate_low',
-            severity: 'medium',
-            message: `La tasa de éxito de descargas cayó a ${Math.round(downloadSuccessRate * 100)}%.`
-        });
-    }
-    if (typeof uploadCompletionRate === 'number' && totalUploadsStarted >= 5 && uploadCompletionRate < 0.75) {
-        alerts.push({
-            code: 'upload_completion_rate_low',
-            severity: 'medium',
-            message: `La tasa de finalización de subidas cayó a ${Math.round(uploadCompletionRate * 100)}%.`
-        });
-    }
-
-    res.json({
-        metrics: snapshot,
-        queue,
-        disk,
-        health: {
-            status: dbOk && uploadsWritable && dataWritable ? 'ok' : 'degraded',
-            db: dbOk,
-            uploads: uploadsWritable,
-            data: dataWritable
-        },
-        alerts,
-        summary: {
-            uploads: {
-                started: totalUploadsStarted,
-                completed: totalUploadsCompleted,
-                cancelled: totalUploadsCancelled,
-                inProgressEstimate: Math.max(0, totalUploadsStarted - totalUploadsCompleted - totalUploadsCancelled),
-                activeSessions: activeUploads,
-                staleSessions: staleUploads,
-                completionRate: uploadCompletionRate
-            },
-            downloads: {
-                started: totalDownloadsStarted,
-                completed: totalDownloadsCompleted,
-                failedOrAborted: totalDownloadsFailed,
-                successRate: downloadSuccessRate
-            },
-            resumable: {
-                probes: totalResumeProbes,
-                availableSessions: totalResumeAvailable,
-                availabilityRate: resumeAvailabilityRate,
-                chunkClientErrors: totalChunkClientErrors,
-                chunkServerErrors: totalChunkServerErrors
-            },
-            http: {
-                totalRequests: totalHttpRequests,
-                ok: counters.http_2xx || 0,
-                clientErrors: counters.http_4xx || 0,
-                serverErrors: counters.http_5xx || 0,
-                serverErrorRate: httpServerErrorRate
-            },
-            storage: {
-                freeBytes: disk?.free || null,
-                sizeBytes: disk?.size || null,
-                freePercent: diskFreePercent
-            }
-        },
-        slo: {
-            uploads: {
-                targetCompletionRate: 0.98,
-                currentCompletionRate: uploadCompletionRate
-            },
-            downloads: {
-                targetSuccessRate: 0.99,
-                currentSuccessRate: downloadSuccessRate
-            },
-            resumable: {
-                targetAvailabilityRate: 0.9,
-                currentAvailabilityRate: resumeAvailabilityRate
-            },
-            http: {
-                targetServerErrorRate: 0.01,
-                currentServerErrorRate: httpServerErrorRate
-            }
-        }
+    const report = await buildOperationalMetrics({
+        db,
+        uploadDir: UPLOAD_DIR,
+        dataDir,
+        checkDiskSpace,
+        fsModule: fs,
+        fsPromisesModule: fsPromises,
+        getQueueStats,
+        metrics,
     });
+    res.json(report);
+}));
+
+app.get('/metrics', asyncHandler(async (req, res) => {
+    if (!canAccessExportedMetrics(req)) {
+        return res.status(401).type('text/plain').send('unauthorized\n');
+    }
+
+    const report = await buildOperationalMetrics({
+        db,
+        uploadDir: UPLOAD_DIR,
+        dataDir,
+        checkDiskSpace,
+        fsModule: fs,
+        fsPromisesModule: fsPromises,
+        getQueueStats,
+        metrics,
+    });
+
+    res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+    res.set('Cache-Control', 'no-store');
+    res.send(serializeOperationalMetricsPrometheus(report));
 }));
 
 // Admin endpoint to schedule cleanup jobs

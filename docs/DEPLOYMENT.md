@@ -15,7 +15,14 @@ Guía recomendada para producción usando Docker.
 cp .env.example .env
 ```
 
-2) Edita .env con tus valores reales (SESSION_SECRET, PUBLIC_ORIGIN, ALLOWED_ORIGINS, etc.)
+2) Edita .env con tus valores reales antes del primer arranque.
+
+- Genera un `SESSION_SECRET` nuevo con `openssl rand -hex 64`.
+- Genera también un `ENCRYPTION_KEY` distinto si vas a guardar settings sensibles en la base de datos.
+- Usa un único `PUBLIC_ORIGIN` válido, sin slash final.
+- Ajusta `ALLOWED_ORIGINS` como lista separada por comas solo si realmente necesitas más de un origen.
+
+Si necesitas correo transaccional desde el arranque, define también `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` y `SMTP_FROM`. Luego podrás sobrescribirlos desde el panel Admin si hace falta.
 
 3) Construye y levanta el servicio:
 

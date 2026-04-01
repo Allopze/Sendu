@@ -215,7 +215,9 @@ const DashboardPage = () => {
                                         </div>
                                         <div className="flex items-center gap-2">
                                             <button
+                                                type="button"
                                                 onClick={() => handleCopy(file.id)}
+                                                aria-label={`Copiar enlace de ${file.originalName}`}
                                                 className={`p-2 rounded-lg transition-colors ${
                                                     copiedId === file.id 
                                                         ? 'bg-green-500 text-white' 
@@ -229,13 +231,16 @@ const DashboardPage = () => {
                                                 href={`/share/${file.id}`}
                                                 target="_blank"
                                                 rel="noopener noreferrer"
+                                                aria-label={`Abrir ${file.originalName} en una nueva pestaña`}
                                                 className={`p-2 rounded-lg transition-colors ${isDark ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-600'}`}
                                                 title="Ver archivo"
                                             >
                                                 <ExternalLink size={16} />
                                             </a>
                                             <button
+                                                type="button"
                                                 onClick={() => handleDelete(file.id, file.originalName)}
+                                                aria-label={`Eliminar ${file.originalName}`}
                                                 className="p-2 rounded-lg hover:bg-red-500/10 text-red-500 transition-colors"
                                                 title="Eliminar"
                                             >

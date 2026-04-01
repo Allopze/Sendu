@@ -5,6 +5,7 @@
 - GET `/api/health`
 - GET `/api/health/ready`
 - GET `/api/admin/metrics`
+- GET `/metrics`
 
 Checklist mínimo antes de abrir tráfico:
 
@@ -51,12 +52,15 @@ También puedes ejecutar limpieza desde Admin:
 
 - GET `/api/admin/jobs/stats`
 - GET `/api/admin/metrics`
+- GET `/metrics`
 
 `/api/admin/metrics` expone:
 
 - `alerts`: alertas derivadas para disk, dead jobs, 5xx, stale uploads y degradación de resume.
 - `summary`: tráfico, storage, uploads, downloads y resumable.
 - `slo`: objetivos y valor actual para completion rate de uploads, success rate de downloads, availability de resumable y server error rate HTTP.
+
+`/metrics` expone el mismo estado resumido en formato Prometheus para scrapers externos. El acceso requiere sesión admin o `Authorization: Bearer <METRICS_EXPORT_TOKEN>`.
 
 ## Logs
 
@@ -119,4 +123,4 @@ Si integras monitorización externa, alerta cuando ocurra cualquiera de estas co
 - Backup diario (cron o scheduler de tu plataforma)
 - Limpieza periódica de archivos expirados
 - Monitorización de `/api/health/ready`
-- Polling de `/api/admin/metrics` hacia tu sistema externo de alertas
+- Scrape o polling de `/metrics` hacia tu sistema externo de alertas

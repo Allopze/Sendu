@@ -16,6 +16,24 @@ const testDbPath = path.join(__dirname, '..', '..', 'data', 'test-upload.sqlite'
 let db;
 let app;
 let startServer;
+const SMTP_ENV_KEYS = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'];
+const originalSmtpEnv = Object.fromEntries(SMTP_ENV_KEYS.map((key) => [key, process.env[key]]));
+
+const clearSmtpEnv = () => {
+    for (const key of SMTP_ENV_KEYS) {
+        delete process.env[key];
+    }
+};
+
+const restoreSmtpEnv = () => {
+    for (const key of SMTP_ENV_KEYS) {
+        if (originalSmtpEnv[key] === undefined) {
+            delete process.env[key];
+            continue;
+        }
+        process.env[key] = originalSmtpEnv[key];
+    }
+};
 
 const extractCsrfToken = (response) => {
     const cookies = response.headers['set-cookie'] || [];
@@ -34,6 +52,7 @@ describe('Upload Init API', () => {
     });
 
     afterAll(() => {
+        restoreSmtpEnv();
         if (db && db.close) {
             db.close();
         }
@@ -45,6 +64,7 @@ describe('Upload Init API', () => {
     beforeEach(() => {
         db.exec('DELETE FROM users');
         db.exec("DELETE FROM settings WHERE key LIKE 'smtp%'");
+        clearSmtpEnv();
     });
 
     it('should reject upload init for unverified user', async () => {
@@ -122,5 +142,34 @@ describe('Upload Init API', () => {
 
         expect(res.status).toBe(200);
         expect(res.body.uploadId).toBeDefined();
+    });
+
+    it('should reject upload init for unverified user when SMTP comes from environment', async () => {
+        process.env.SMTP_HOST = 'smtp.example.com';
+        process.env.SMTP_PORT = '587';
+        process.env.SMTP_USER = 'mailer@example.com';
+        process.env.SMTP_PASS = 'env-secret';
+        process.env.SMTP_FROM = 'ops@example.com';
+
+        const userId = uuidv4();
+        const hashedPassword = await bcrypt.hash('Password123', 10);
+        db.prepare('INSERT INTO users (id, email, username, passwordHash, isVerified, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
+            .run(userId, 'envsmtp@example.com', 'user-envsmtp', hashedPassword, 0, Date.now());
+
+        const agent = request.agent(app);
+        await agent.post('/api/auth/login').send({ login: 'envsmtp@example.com', password: 'Password123' });
+        const csrfRes = await agent.get('/api/auth/me');
+        const csrfToken = extractCsrfToken(csrfRes);
+
+        const res = await agent.post('/api/upload/init')
+            .set('x-csrf-token', csrfToken)
+            .send({
+                originalName: 'test.txt',
+                size: 1024,
+                mimeType: 'text/plain',
+                totalChunks: 1
+            });
+
+        expect(res.status).toBe(403);
     });
 });
