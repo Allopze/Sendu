@@ -43,6 +43,28 @@ Si la sesión se cierra al refrescar la página, verifica:
 | --- | --- | --- |
 | NODE_ENV | No | development o production. |
 | PORT | No | Puerto del backend (por defecto 3000). |
+| HOST_PORT | No | Puerto publicado por Docker Compose en la máquina host. Úsalo si `3000` ya está ocupado. |
+
+## Perfil de despliegue y topología
+
+Estas variables no cambian automáticamente el backend hoy. Se usan para declarar la topología objetivo, exponerla en `/api/admin/metrics` y `/metrics`, y disparar alertas si alguien marca un despliegue como HA sin la composición esperada.
+
+| Variable | Requerida | Descripción |
+| --- | --- | --- |
+| DEPLOYMENT_PROFILE | No | `single` o `ha`. Usa `ha` solo cuando la topología externa ya no dependa de SQLite para coordinar réplicas. |
+| STATE_BACKEND | No | Backend de estado relacional declarado (`sqlite` o `postgresql`). El runtime actual sigue usando SQLite; `postgresql` documenta la topología objetivo y alimenta métricas/alertas. |
+| SESSION_BACKEND | No | Backend declarado para sesiones (`sqlite` o `redis`). |
+| RATE_LIMIT_BACKEND | No | Backend declarado para rate limiting (`sqlite` o `redis`). |
+| QUEUE_BACKEND | No | Backend declarado para cola de trabajos (`sqlite`, `postgresql` o `redis`). La estrategia objetivo para HA es `postgresql`. |
+| UPLOAD_STORAGE_BACKEND | No | Backend declarado para binarios (`filesystem`, `shared-filesystem` u `object-storage`). Para HA se recomienda `object-storage`; `shared-filesystem` puede servir como transición controlada. |
+
+Si `DEPLOYMENT_PROFILE=ha`, el reporte operativo marcará la topología como no lista mientras no vea al menos:
+
+- `STATE_BACKEND=postgresql`
+- `SESSION_BACKEND=redis`
+- `RATE_LIMIT_BACKEND=redis`
+- `QUEUE_BACKEND=postgresql`
+- `UPLOAD_STORAGE_BACKEND=object-storage` o `shared-filesystem`
 
 ## Registro de usuarios
 

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { RefreshCw, AlertCircle, Clock, Lock, Eye, EyeOff, X, Upload, Check, Copy, ExternalLink, Plus, FolderOpen, Loader2, File as FileIcon, Folder, Trash2, Archive, Image, FileText, FileVideo, FileAudio, FileCode, FileArchive, FileSpreadsheet, Presentation, FileJson, FilePlus, FolderPlus } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
@@ -31,7 +31,6 @@ const HomePage = () => {
     const [showFileLimitModal, setShowFileLimitModal] = useState(false);
     const fileInputRef = useRef(null);
     const folderInputRef = useRef(null);
-    const zipWorkerRef = useRef(null);
     const limits = useUploadLimits();
     
     const { 
@@ -43,7 +42,8 @@ const HomePage = () => {
         eta, 
         currentFile,
         currentOptions,
-        uploadFile, 
+        uploadFile,
+        uploadArchive,
         cancelUpload, 
         resetUpload 
     } = useUploadContext();
@@ -54,13 +54,6 @@ const HomePage = () => {
             setFile(currentFile);
         }
     }, [currentFile, status, file]);
-
-    useEffect(() => {
-        return () => {
-            zipWorkerRef.current?.terminate();
-            zipWorkerRef.current = null;
-        };
-    }, []);
 
     useEffect(() => {
         if (status !== 'idle' && currentOptions) {
@@ -262,91 +255,41 @@ const HomePage = () => {
         setUsePassword(false);
     };
 
-    const createZipFromFiles = useCallback(async (files) => {
-        if (typeof Worker === 'undefined') {
-            throw new Error('Tu navegador no soporta workers para comprimir archivos grandes');
-        }
-
-        const workerFiles = files.map(({ file, path }) => ({
-            path,
-            name: file.name,
-            type: file.type,
-            lastModified: file.lastModified,
-            file
-        }));
-
-        return new Promise((resolve, reject) => {
-            zipWorkerRef.current?.terminate();
-
-            const worker = new Worker(new URL('../workers/zipWorker.js', import.meta.url), { type: 'module' });
-            zipWorkerRef.current = worker;
-
-            worker.onmessage = (event) => {
-                const { type, progress: nextProgress, zipName, buffer, error: workerError } = event.data || {};
-
-                if (type === 'progress') {
-                    setZipProgress(nextProgress || 0);
-                    return;
-                }
-
-                if (type === 'complete') {
-                    zipWorkerRef.current = null;
-                    worker.terminate();
-                    resolve(new File([buffer], zipName || 'archivos.zip', { type: 'application/zip' }));
-                    return;
-                }
-
-                if (type === 'error') {
-                    zipWorkerRef.current = null;
-                    worker.terminate();
-                    reject(new Error(workerError || 'No se pudo comprimir la selección'));
-                }
-            };
-
-            worker.onerror = (event) => {
-                zipWorkerRef.current = null;
-                worker.terminate();
-                reject(new Error(event.message || 'No se pudo iniciar la compresión en background'));
-            };
-
-            worker.postMessage({ files: workerFiles });
-        });
-    }, []);
-
     const handleStartUpload = async () => {
         if (pendingFiles.length === 0) return;
-        
-        let fileToUpload;
-        
+
         if (pendingFiles.length === 1 && !pendingFiles[0].path.includes('/')) {
-            // Un solo archivo sin carpeta - subir directamente
-            fileToUpload = pendingFiles[0].file;
-        } else {
-            // Múltiples archivos o carpetas - crear ZIP
-            setIsZipping(true);
-            setZipProgress(0);
-            try {
-                fileToUpload = await createZipFromFiles(pendingFiles);
-            } catch (err) {
-                console.error('Error creating ZIP:', err);
-                setIsZipping(false);
-                return;
-            }
+            const fileToUpload = pendingFiles[0].file;
+            setFile(fileToUpload);
+            uploadFile(fileToUpload, options, location.pathname);
+            return;
+        }
+
+        setIsZipping(true);
+        setZipProgress(0);
+        try {
+            await uploadArchive(pendingFiles, options, location.pathname, {
+                onZipProgress: (nextProgress) => setZipProgress(nextProgress || 0),
+                onZipStateChange: (nextState) => setIsZipping(Boolean(nextState))
+            });
+        } catch (err) {
+            console.error('Error creating ZIP stream:', err);
             setIsZipping(false);
         }
-        
-        setFile(fileToUpload);
-        uploadFile(fileToUpload, options, location.pathname);
     };
 
     const handleCancel = () => {
         cancelUpload();
+        setIsZipping(false);
+        setZipProgress(0);
         setFile(null);
     };
 
     const handleReset = () => {
         resetUpload();
         setFile(null);
+        setIsZipping(false);
+        setZipProgress(0);
         setPendingFiles([]);
         setOptions({ expires: '7', password: '' });
         setUsePassword(false);

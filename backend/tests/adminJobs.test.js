@@ -190,4 +190,22 @@ describe('Admin Jobs API', () => {
         expect(res.status).toBe(400);
         expect(res.body.error).toContain('Tipo de job invalido');
     });
+
+    it('returns 401 for exported metrics without admin session or token', async () => {
+        const res = await request(app).get('/metrics');
+
+        expect(res.status).toBe(401);
+        expect(res.text).toBe('unauthorized\n');
+    });
+
+    it('allows exported metrics with an admin session', async () => {
+        await createUser({ role: 'admin', email: 'admin4@example.com', username: 'admin4' });
+        const agent = await loginAs('admin4@example.com');
+
+        const res = await agent.get('/metrics');
+
+        expect(res.status).toBe(200);
+        expect(res.headers['content-type']).toContain('text/plain');
+        expect(res.text).toContain('sendu_health');
+    });
 });

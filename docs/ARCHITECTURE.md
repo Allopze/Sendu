@@ -1,5 +1,7 @@
 # Sendu Architecture & Refactoring Guide
 
+For a concrete 4+ instance / high-availability target topology, see [docs/SCALING.md](docs/SCALING.md).
+
 ## Current State (v2.x)
 
 ### Data Persistence

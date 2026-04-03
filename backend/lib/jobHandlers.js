@@ -11,9 +11,12 @@ import fs from 'fs';
 import path from 'path';
 import logger from './logger.js';
 import { registerJobHandler, JOB_TYPES } from './jobQueue.js';
+import { summarizeEmailForLogs } from './emailLog.js';
+import { createFilesRepository } from './filesRepository.js';
 
 let db = null;
 let smtpConfigGetter = null;
+let filesRepository = null;
 
 /**
  * Initialize job handlers with dependencies
@@ -23,6 +26,7 @@ let smtpConfigGetter = null;
 export function initJobHandlers(database, getSmtpConfig) {
     db = database;
     smtpConfigGetter = getSmtpConfig;
+    filesRepository = createFilesRepository({ db: database });
     
     // Register all handlers
     registerJobHandler(JOB_TYPES.EMAIL, handleEmailJob);
@@ -71,11 +75,11 @@ async function handleEmailJob(payload) {
         replyTo: replyTo,
     });
     
-    logger.info('Email sent via job queue', { 
-        to, 
-        subject, 
-        messageId: result.messageId 
-    });
+    logger.info('Email sent via job queue', summarizeEmailForLogs({
+        to,
+        subject,
+        messageId: result.messageId
+    }));
     
     return result;
 }
@@ -97,53 +101,22 @@ async function handleFileCleanupJob(payload) {
     const now = Date.now();
     let deletedCount = 0;
     let freedBytes = 0;
-    
-    // Get expired files from database
-    const expiredFiles = db.prepare(`
-        SELECT id, serverPath, size FROM files 
-        WHERE expiresAt IS NOT NULL AND expiresAt < ?
-    `).all(now);
-    
-    for (const file of expiredFiles) {
-        try {
-            // Delete the file
-            if (file.serverPath && fs.existsSync(file.serverPath)) {
-                const stats = await fsPromises.stat(file.serverPath);
-                await fsPromises.unlink(file.serverPath);
-                freedBytes += stats.size;
-            }
-            
-            // Delete from database
-            db.prepare('DELETE FROM files WHERE id = ?').run(file.id);
-            deletedCount++;
-            
-        } catch (err) {
-            logger.warn('Error deleting expired file', { 
-                fileId: file.id, 
-                error: err.message 
-            });
-        }
-    }
-    
-    // Also clean files that have reached max downloads
-    const maxDownloadFiles = db.prepare(`
-        SELECT id, serverPath, size FROM files 
-        WHERE maxDownloads IS NOT NULL AND downloadCount >= maxDownloads
-    `).all();
-    
-    for (const file of maxDownloadFiles) {
+
+    const cleanupCandidates = await filesRepository.listCleanupCandidates(now);
+
+    for (const file of cleanupCandidates) {
         try {
             if (file.serverPath && fs.existsSync(file.serverPath)) {
                 const stats = await fsPromises.stat(file.serverPath);
                 await fsPromises.unlink(file.serverPath);
                 freedBytes += stats.size;
             }
-            
-            db.prepare('DELETE FROM files WHERE id = ?').run(file.id);
+
+            await filesRepository.deleteById(file.id);
             deletedCount++;
-            
+
         } catch (err) {
-            logger.warn('Error deleting max-download file', { 
+            logger.warn('Error deleting cleanup candidate file', {
                 fileId: file.id, 
                 error: err.message 
             });

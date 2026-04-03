@@ -288,4 +288,75 @@ describe('E2E Upload/Download', () => {
         expect(downloadRes.body.length).toBe(content.length);
         expect(downloadRes.body.equals(content)).toBe(true);
     });
+
+    it('should complete a streaming ZIP upload using the declared final chunk and actual size', async () => {
+        const zipHex = [
+            '504b03041400000000000000000086a61036050000000500000006000000',
+            '68692e74787468656c6c6f',
+            '504b010214001400000000000000000086a610360500000005000000060000000000000000000000000000000000',
+            '68692e747874',
+            '504b0506000000000100010034000000290000000000'
+        ].join('');
+        const zipContent = Buffer.from(zipHex, 'hex');
+        const firstChunk = zipContent.subarray(0, 64);
+        const secondChunk = zipContent.subarray(64);
+        const agent = request.agent(app);
+
+        const csrfRes = await agent.get('/api/auth/me');
+        let csrfToken = extractCsrfToken(csrfRes);
+
+        const initRes = await agent
+            .post('/api/upload/init')
+            .set('x-csrf-token', csrfToken)
+            .send({
+                originalName: 'archivos.zip',
+                size: zipContent.length + 128,
+                mimeType: 'application/zip',
+                totalChunks: 4,
+                chunkSize: 64,
+                streamingZip: true
+            });
+
+        expect(initRes.status).toBe(200);
+        csrfToken = extractCsrfToken(initRes) || csrfToken;
+
+        const uploadId = initRes.body.uploadId;
+        const uploadToken = initRes.body.uploadToken;
+
+        const firstUploadRes = await agent
+            .post(`/api/upload/chunk?uploadId=${uploadId}&index=0`)
+            .set('x-upload-token', uploadToken)
+            .attach('chunk', firstChunk, 'archivos.zip.part0');
+
+        const secondUploadRes = await agent
+            .post(`/api/upload/chunk?uploadId=${uploadId}&index=1`)
+            .set('x-upload-token', uploadToken)
+            .attach('chunk', secondChunk, 'archivos.zip.part1');
+
+        expect(firstUploadRes.status).toBe(200);
+        expect(secondUploadRes.status).toBe(200);
+
+        const completeRes = await agent
+            .post('/api/upload/complete')
+            .set('x-csrf-token', csrfToken)
+            .send({
+                uploadId,
+                finalChunkIndex: 1,
+                actualSize: zipContent.length
+            });
+
+        expect(completeRes.status).toBe(200);
+
+        const downloadRes = await agent
+            .get(`/api/download/${completeRes.body.fileId}`)
+            .buffer(true)
+            .parse((res, cb) => {
+                const data = [];
+                res.on('data', (chunk) => data.push(chunk));
+                res.on('end', () => cb(null, Buffer.concat(data)));
+            });
+
+        expect(downloadRes.status).toBe(200);
+        expect(downloadRes.body.equals(zipContent)).toBe(true);
+    });
 });

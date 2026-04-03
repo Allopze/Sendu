@@ -21,7 +21,7 @@ import { fileTypeFromFile } from 'file-type';
 import { DEFAULT_EMAIL_TEMPLATES } from './templates/email/index.js';
 import logger, { httpLogger } from './lib/logger.js';
 import { csrfProtection, enablePersistentStorage as enableCsrfPersistence } from './lib/csrf.js';
-import { encrypt, decrypt, isEncrypted } from './lib/encryption.js';
+import { encrypt, decrypt, isEncrypted, getEncryptionFormat } from './lib/encryption.js';
 import { hashToken, generateSecureToken } from './lib/tokenHash.js';
 import { generateFingerprint, getIpFingerprint, canGuestUpload, recordGuestUpload, enablePersistentStorage as enableGuestPersistence } from './lib/guestTracking.js';
 import { initPersistentStores, createSqliteSessionStore, createDownloadToken, validateDownloadToken, createRateLimitStore, resetRateLimits } from './lib/persistentStores.js';
@@ -36,6 +36,17 @@ import { metrics } from './lib/metrics.js';
 import { runMigrations } from './lib/migrations.js';
 import { antivirus } from './lib/antivirus.js';
 import { createUploadSessionToken, validateUploadSessionToken } from './lib/uploadSessionToken.js';
+import { summarizeEmailForLogs } from './lib/emailLog.js';
+import { createSettingsRepository } from './lib/settingsRepository.js';
+import { createUsersRepository } from './lib/usersRepository.js';
+import { createUploadSessionsRepository } from './lib/uploadSessionsRepository.js';
+import { createFilesRepository } from './lib/filesRepository.js';
+import { createDatabaseHealthRepository } from './lib/databaseHealthRepository.js';
+import {
+    initializeDatabaseDefaults,
+    seedDefaultBrandingSettings,
+    logDatabaseStats,
+} from './lib/bootstrap.js';
 import {
     applyAdminSettings,
     serializeAdminSettings,
@@ -46,10 +57,20 @@ import {
     serializeOperationalMetricsPrometheus,
 } from './lib/operationalMetrics.js';
 import {
+    SMTP_ENV_KEY_MAP,
     getSmtpEnvironmentConfig,
     mergeSmtpConfig,
     mergeSmtpIntoSettings,
 } from './lib/smtpConfig.js';
+import { registerAuthRoutes } from './routes/auth.js';
+import { registerPublicSettingsRoutes } from './routes/publicSettings.js';
+import { registerAdminOperationsRoutes } from './routes/adminOperations.js';
+import { registerUploadRoutes } from './routes/upload.js';
+import { registerAdminSettingsRoutes } from './routes/adminSettings.js';
+import { registerDownloadRoutes } from './routes/download.js';
+import { registerFileRoutes } from './routes/files.js';
+import { registerAdminUserRoutes } from './routes/adminUsers.js';
+import { registerHealthRoutes } from './routes/health.js';
 
 dotenv.config();
 
@@ -137,6 +158,71 @@ const dbPath = path.join(dataDir, 'db.sqlite');
 
 // Initialize database (will be set after async init)
 let db = null;
+let settingsRepository = null;
+let usersRepository = null;
+let uploadSessionsRepository = null;
+let filesRepository = null;
+let databaseHealthRepository = null;
+
+const getSettingsRepository = () => {
+    if (!db) {
+        throw new Error('Settings repository requested before database initialization');
+    }
+
+    if (!settingsRepository) {
+        settingsRepository = createSettingsRepository({ db });
+    }
+
+    return settingsRepository;
+};
+
+const getUsersRepository = () => {
+    if (!db) {
+        throw new Error('Users repository requested before database initialization');
+    }
+
+    if (!usersRepository) {
+        usersRepository = createUsersRepository({ db });
+    }
+
+    return usersRepository;
+};
+
+const getUploadSessionsRepository = () => {
+    if (!db) {
+        throw new Error('Upload sessions repository requested before database initialization');
+    }
+
+    if (!uploadSessionsRepository) {
+        uploadSessionsRepository = createUploadSessionsRepository({ db });
+    }
+
+    return uploadSessionsRepository;
+};
+
+const getFilesRepository = () => {
+    if (!db) {
+        throw new Error('Files repository requested before database initialization');
+    }
+
+    if (!filesRepository) {
+        filesRepository = createFilesRepository({ db });
+    }
+
+    return filesRepository;
+};
+
+const getDatabaseHealthRepository = () => {
+    if (!db) {
+        throw new Error('Database health repository requested before database initialization');
+    }
+
+    if (!databaseHealthRepository) {
+        databaseHealthRepository = createDatabaseHealthRepository({ db });
+    }
+
+    return databaseHealthRepository;
+};
 
 // Session Store - Will be initialized after database is ready
 let SqliteSessionStore = null;
@@ -173,6 +259,102 @@ const TEMP_DIR = process.env.APP_TEMP_PATH || path.join(rootDir, 'tmp');
 const MAX_CHUNK_UPLOAD_BYTES = 200 * 1024 * 1024; // Hard limit to match multer and proxy limits
 const MAX_UPLOAD_SESSION_AGE_MS = parseInt(process.env.UPLOAD_SESSION_MAX_AGE_HOURS || '24', 10) * 60 * 60 * 1000;
 
+const RUNTIME_SETTINGS_KEYS = [
+    'largeFileChunkSize',
+    'maxFileSize',
+    'maxTotalSize',
+    'guestUploadLimit',
+    'guestMaxFileSize',
+    'chunkRateLimit',
+    'maxConcurrentUploads',
+    'smtpHost',
+    'smtpPort',
+    'smtpSecure',
+    'smtpUser',
+    'smtpPass',
+    'smtpFrom',
+    'emailTemplates',
+    'logoDarkEmail',
+    'logoDark',
+    'logoLightEmail',
+    'logoLight'
+];
+const RUNTIME_SETTINGS_REFRESH_TTL_MS = isTest ? 0 : 30000;
+let runtimeSettingsCache = {
+    values: new Map(),
+    refreshedAt: 0,
+    dirty: true,
+    refreshPromise: null,
+};
+
+const resetRuntimeSettingsCache = () => {
+    runtimeSettingsCache = {
+        values: new Map(),
+        refreshedAt: 0,
+        dirty: true,
+        refreshPromise: null,
+    };
+};
+
+const markRuntimeSettingsCacheStale = () => {
+    runtimeSettingsCache.dirty = true;
+    runtimeSettingsCache.refreshedAt = 0;
+};
+
+const getRuntimeSettingValue = (key, defaultValue = null) => {
+    if (!runtimeSettingsCache.values.has(key)) {
+        return defaultValue;
+    }
+
+    return runtimeSettingsCache.values.get(key);
+};
+
+const refreshRuntimeSettingsCache = async ({ force = false } = {}) => {
+    if (!db) {
+        return runtimeSettingsCache.values;
+    }
+
+    const now = Date.now();
+    if (!force && !runtimeSettingsCache.dirty && (now - runtimeSettingsCache.refreshedAt) < RUNTIME_SETTINGS_REFRESH_TTL_MS) {
+        return runtimeSettingsCache.values;
+    }
+
+    if (runtimeSettingsCache.refreshPromise) {
+        return runtimeSettingsCache.refreshPromise;
+    }
+
+    runtimeSettingsCache.refreshPromise = (async () => {
+        const rows = await getSettingsRepository().listByKeys(RUNTIME_SETTINGS_KEYS);
+        const nextValues = new Map();
+
+        rows.forEach((row) => {
+            nextValues.set(row.key, row.value);
+        });
+
+        runtimeSettingsCache.values = nextValues;
+        runtimeSettingsCache.refreshedAt = Date.now();
+        runtimeSettingsCache.dirty = false;
+        return runtimeSettingsCache.values;
+    })()
+        .catch((err) => {
+            logger.warn('Runtime settings cache refresh failed', { error: err.message });
+            throw err;
+        })
+        .finally(() => {
+            runtimeSettingsCache.refreshPromise = null;
+        });
+
+    return runtimeSettingsCache.refreshPromise;
+};
+
+const ensureRuntimeSettingsLoaded = async (req, res, next) => {
+    try {
+        await refreshRuntimeSettingsCache();
+    } catch {}
+
+    next();
+};
+
 // Ensure directories exist
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 if (!fs.existsSync(CHUNKS_DIR)) fs.mkdirSync(CHUNKS_DIR, { recursive: true });
@@ -180,82 +362,22 @@ if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 // Helper: Get max chunk size from settings (for validation)
 // Needs to be defined before chunk router
-let maxChunkSizeCache = { value: 200 * 1024 * 1024, ts: 0 };
-const MAX_CHUNK_SIZE_TTL = 60 * 1000; // 1 minuto
 const getMaxChunkSizeFromSettingsSync = () => {
-    const now = Date.now();
-    if (now - maxChunkSizeCache.ts < MAX_CHUNK_SIZE_TTL) {
-        return maxChunkSizeCache.value;
-    }
-    if (!db) return maxChunkSizeCache.value;
-    try {
-        const largeChunkSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('largeFileChunkSize');
-        const largeChunk = largeChunkSetting ? parseInt(largeChunkSetting.value) : 100;
-        const computed = Math.max(largeChunk * 1.2, 200) * 1024 * 1024;
-        const value = Math.min(computed, MAX_CHUNK_UPLOAD_BYTES);
-        maxChunkSizeCache = { value, ts: now };
-        return value;
-    } catch {
-        return maxChunkSizeCache.value;
-    }
-};
-
-// Centralized settings cache with prepared statement
-// Reduces repeated db.prepare() calls throughout the codebase
-const settingsCache = new Map();
-const SETTINGS_CACHE_TTL = 30000; // 30 seconds
-let getSettingStmt = null;
-
-const getSetting = (key, defaultValue = null) => {
-    const now = Date.now();
-    const cached = settingsCache.get(key);
-
-    if (cached && (now - cached.ts) < SETTINGS_CACHE_TTL) {
-        return cached.value;
-    }
-
-    if (!db) return defaultValue;
-
-    try {
-        // Lazy init prepared statement (db may not exist at module load time)
-        if (!getSettingStmt) {
-            getSettingStmt = db.prepare('SELECT value FROM settings WHERE key = ?');
-        }
-        const row = getSettingStmt.get(key);
-        const value = row ? row.value : defaultValue;
-        settingsCache.set(key, { value, ts: now });
-        return value;
-    } catch {
-        return defaultValue;
-    }
+    const configuredChunkSize = parseInt(getRuntimeSettingValue('largeFileChunkSize'), 10);
+    const largeChunk = Number.isFinite(configuredChunkSize) ? configuredChunkSize : 100;
+    const computed = Math.max(largeChunk * 1.2, 200) * 1024 * 1024;
+    return Math.min(computed, MAX_CHUNK_UPLOAD_BYTES);
 };
 
 // Invalidate cache when settings are updated
 const invalidateSettingsCache = (keys = null) => {
-    if (keys) {
-        keys.forEach(k => settingsCache.delete(k));
-    } else {
-        settingsCache.clear();
-    }
-    // Also invalidate related caches
-    maxChunkSizeCache.ts = 0;
-    uploadLimitsCache.ts = 0;
+    markRuntimeSettingsCacheStale();
+    refreshRuntimeSettingsCache({ force: true }).catch(() => {});
 };
 
 // Helper: Get upload limits from settings (used by chunk router)
 // Needs to be defined before chunk router
-// Cache with 30s TTL to reduce DB queries during uploads
-let uploadLimitsCache = { value: null, ts: 0 };
-const UPLOAD_LIMITS_CACHE_TTL = 30000; // 30 seconds
-
 const getUploadLimits = () => {
-    const now = Date.now();
-
-    // Return cached value if still valid
-    if (uploadLimitsCache.value && (now - uploadLimitsCache.ts) < UPLOAD_LIMITS_CACHE_TTL) {
-        return uploadLimitsCache.value;
-    }
-
     const limits = {
         maxFileSize: 100,        // Default 100MB for registered users
         maxTotalSize: 500,       // Default 500MB total for registered users
@@ -263,18 +385,12 @@ const getUploadLimits = () => {
         guestMaxFileSize: 50     // Default 50MB max file size for guests
     };
 
-    if (!db) return limits;
-    try {
-        const keys = ['maxFileSize', 'maxTotalSize', 'guestUploadLimit', 'guestMaxFileSize'];
-        const stmt = db.prepare(`SELECT * FROM settings WHERE key IN (${keys.map(() => '?').join(',')})`);
-        const settings = stmt.all(...keys);
-        settings.forEach(s => limits[s.key] = parseInt(s.value) || limits[s.key]);
-
-        // Cache the result
-        uploadLimitsCache = { value: limits, ts: now };
-    } catch {
-        return limits;
-    }
+    ['maxFileSize', 'maxTotalSize', 'guestUploadLimit', 'guestMaxFileSize'].forEach((key) => {
+        const parsed = parseInt(getRuntimeSettingValue(key), 10);
+        if (Number.isFinite(parsed)) {
+            limits[key] = parsed;
+        }
+    });
 
     return limits;
 };
@@ -297,26 +413,13 @@ const chunkCorsOptions = {
 const noopLimiter = (req, res, next) => next();
 
 // Rate limit for chunks (permissive)
-let chunkRateLimitCache = { value: 1000, ts: 0 };
-const CHUNK_RATE_LIMIT_TTL = 60 * 1000;
 const chunkRateLimiter = isTest ? noopLimiter : rateLimit({
     windowMs: 60 * 1000, // 1 minute
     store: createRateLimitStore(60 * 1000, { keyPrefix: 'chunk' }),
     keyGenerator: (req) => ipKeyGenerator(req),
     max: () => {
-        const now = Date.now();
-        if (now - chunkRateLimitCache.ts < CHUNK_RATE_LIMIT_TTL) {
-            return chunkRateLimitCache.value;
-        }
-        if (!db) return chunkRateLimitCache.value;
-        try {
-            const setting = db.prepare('SELECT value FROM settings WHERE key = ?').get('chunkRateLimit');
-            const value = setting ? parseInt(setting.value) || 1000 : 1000;
-            chunkRateLimitCache = { value, ts: now };
-            return value;
-        } catch {
-            return chunkRateLimitCache.value;
-        }
+        const configuredLimit = parseInt(getRuntimeSettingValue('chunkRateLimit'), 10);
+        return Number.isFinite(configuredLimit) ? Math.max(1, configuredLimit) : 1000;
     },
     message: { error: 'Demasiadas solicitudes de subida. Espera un momento e intenta de nuevo.' }
 });
@@ -327,7 +430,7 @@ const chunkRouter = createChunkRouter({
     TEMP_DIR,
     getMaxChunkSize: getMaxChunkSizeFromSettingsSync,
     getUploadLimits,
-    db: () => db, // Getter function since db is initialized later
+    getUploadSessionsRepository,
     isProduction,
     maxUploadAgeMs: MAX_UPLOAD_SESSION_AGE_MS
 });
@@ -335,6 +438,7 @@ const chunkRouter = createChunkRouter({
 // Apply minimal middleware only to chunk route
 app.use('/api/upload/chunk',
     cors(chunkCorsOptions),
+    ensureRuntimeSettingsLoaded,
     chunkRateLimiter,
     chunkRouter
 );
@@ -395,6 +499,8 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use('/api', ensureRuntimeSettingsLoaded);
+app.use('/metrics', ensureRuntimeSettingsLoaded);
 
 // HTTP Request Logging
 app.use(httpLogger);
@@ -612,20 +718,6 @@ const getDefaultBrandingSettings = () => {
     return defaults;
 };
 
-const ensureDefaultBrandingSettings = () => {
-    if (!db) return;
-    const defaults = getDefaultBrandingSettings();
-    const stmtGet = db.prepare('SELECT value FROM settings WHERE key = ?');
-    const stmtInsert = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
-
-    for (const [key, value] of Object.entries(defaults)) {
-        if (!value) continue;
-        const existing = stmtGet.get(key);
-        if (existing?.value) continue;
-        stmtInsert.run(key, value);
-    }
-};
-
 // Helper: Get SMTP config from settings (with decryption for sensitive fields)
 const getSmtpConfig = () => {
     const envConfig = getSmtpEnvironmentConfig();
@@ -633,17 +725,31 @@ const getSmtpConfig = () => {
         return envConfig;
     }
 
-    const settings = db.prepare('SELECT key, value FROM settings WHERE key LIKE ?').all('smtp%');
     const storedConfig = {};
     const sensitiveKeys = ['smtpPass'];
-    settings.forEach(s => {
+    Object.keys(SMTP_ENV_KEY_MAP).forEach((key) => {
+        const value = getRuntimeSettingValue(key);
+        if (!value) {
+            return;
+        }
+
         // Decrypt sensitive values
-        if (sensitiveKeys.includes(s.key) && isEncrypted(s.value)) {
-            storedConfig[s.key] = decrypt(s.value);
+        if (sensitiveKeys.includes(key) && isEncrypted(value)) {
+            try {
+                storedConfig[key] = decrypt(value);
+            } catch (err) {
+                logger.warn('Sensitive setting decryption failed; ignoring stored value', {
+                    key,
+                    format: getEncryptionFormat(value),
+                    error: err.message
+                });
+                storedConfig[key] = '';
+            }
         } else {
-            storedConfig[s.key] = s.value;
+            storedConfig[key] = value;
         }
     });
+
     return mergeSmtpConfig(envConfig, storedConfig);
 };
 
@@ -654,11 +760,10 @@ const isEmailDeliveryEnabled = () => {
 
 // Helper: Get email templates from settings (with fallback to defaults)
 const getEmailTemplates = () => {
-    const stmt = db.prepare('SELECT value FROM settings WHERE key = ?');
-    const result = stmt.get('emailTemplates');
-    if (result && result.value) {
+    const serializedTemplates = getRuntimeSettingValue('emailTemplates');
+    if (serializedTemplates) {
         try {
-            const savedTemplates = JSON.parse(result.value);
+            const savedTemplates = JSON.parse(serializedTemplates);
             // Merge with defaults (saved templates take priority)
             return { ...DEFAULT_EMAIL_TEMPLATES, ...savedTemplates };
         } catch (e) {
@@ -745,7 +850,7 @@ const sendEmail = async (to, subject, text, html = null) => {
     const transporter = createSmtpTransporter();
 
     if (!transporter) {
-        logger.info('Email sent (mock mode)', { to, subject });
+        logger.info('Email sent (mock mode)', summarizeEmailForLogs({ to, subject }));
         return { success: true, mock: true };
     }
 
@@ -778,21 +883,21 @@ const sendTemplatedEmail = async (to, templateName, variables = {}, options = {}
 
     // Get logo URL from branding settings - use dark theme for emails (dark header background)
     // Prefer PNG version for emails (better compatibility with email clients)
-    const logoDarkEmailSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('logoDarkEmail');
-    const logoDarkSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('logoDark');
-    const logoLightEmailSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('logoLightEmail');
-    const logoLightSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('logoLight');
+    const logoDarkEmailSetting = getRuntimeSettingValue('logoDarkEmail', '');
+    const logoDarkSetting = getRuntimeSettingValue('logoDark', '');
+    const logoLightEmailSetting = getRuntimeSettingValue('logoLightEmail', '');
+    const logoLightSetting = getRuntimeSettingValue('logoLight', '');
 
     let logoUrl;
     // Priority: logoDarkEmail > logoDark > logoLightEmail > logoLight > default
-    if (logoDarkEmailSetting?.value) {
-        logoUrl = ensureAbsoluteUrl(logoDarkEmailSetting.value);
-    } else if (logoDarkSetting?.value) {
-        logoUrl = ensureAbsoluteUrl(logoDarkSetting.value);
-    } else if (logoLightEmailSetting?.value) {
-        logoUrl = ensureAbsoluteUrl(logoLightEmailSetting.value);
-    } else if (logoLightSetting?.value) {
-        logoUrl = ensureAbsoluteUrl(logoLightSetting.value);
+    if (logoDarkEmailSetting) {
+        logoUrl = ensureAbsoluteUrl(logoDarkEmailSetting);
+    } else if (logoDarkSetting) {
+        logoUrl = ensureAbsoluteUrl(logoDarkSetting);
+    } else if (logoLightEmailSetting) {
+        logoUrl = ensureAbsoluteUrl(logoLightEmailSetting);
+    } else if (logoLightSetting) {
+        logoUrl = ensureAbsoluteUrl(logoLightSetting);
     } else {
         // No logo configured, use empty string so alt text shows
         logoUrl = '';
@@ -820,7 +925,11 @@ const sendTemplatedEmail = async (to, templateName, variables = {}, options = {}
 
     // If SMTP is not configured, skip queueing to avoid noisy job failures
     if (!smtpConfigured) {
-        logger.warn('SMTP not configured, skipping email queue', { to, templateName });
+        logger.warn('SMTP not configured, skipping email queue', summarizeEmailForLogs({
+            to,
+            subject,
+            templateName
+        }));
         return { queued: false, mock: true };
     }
 
@@ -831,12 +940,17 @@ const sendTemplatedEmail = async (to, templateName, variables = {}, options = {}
     }
 
     // Queue the email for background processing
-    const jobId = enqueueEmail(to, subject, html, {
+    const jobId = await enqueueEmail(to, subject, html, {
         from: config.smtpFrom || config.smtpUser,
         priority: options.priority,
     });
 
-    logger.debug('Email queued', { to, templateName, jobId });
+    logger.debug('Email queued', summarizeEmailForLogs({
+        to,
+        subject,
+        templateName,
+        jobId
+    }));
     return { queued: true, jobId };
 };
 
@@ -865,399 +979,40 @@ const isValidPassword = (password) => {
         && /[0-9]/.test(password);
 };
 
-// Auth Routes
-app.get('/api/auth/csrf', (req, res) => {
-    res.json({
-        token: typeof req.csrfToken === 'function' ? req.csrfToken() : null
-    });
+registerAuthRoutes({
+    app,
+    authLimiter,
+    passwordResetLimiter,
+    asyncHandler,
+    getUsersRepository,
+    bcrypt,
+    uuidv4,
+    logger,
+    hashToken,
+    generateSecureToken,
+    safeCompare,
+    sendTemplatedEmail,
+    PUBLIC_ORIGIN,
+    ALLOW_PUBLIC_REGISTRATION,
+    ADMIN_BOOTSTRAP_TOKEN,
+    PASSWORD_POLICY_MESSAGE,
+    isValidEmail,
+    isValidUsername,
+    isValidPassword,
+    isEmailDeliveryEnabled,
+    requireAuth,
+    sessionCookieDomain,
+    sessionCookieSecure,
+    sessionCookieSameSite,
 });
-
-app.post('/api/auth/register', authLimiter, asyncHandler(async (req, res) => {
-    const { email, username, password, adminBootstrapToken } = req.body;
-    if (!email || !username || !password) return res.status(400).json({ error: 'Faltan campos requeridos' });
-
-    // Validate email format
-    if (!isValidEmail(email)) {
-        return res.status(400).json({ error: 'Formato de email inválido' });
-    }
-
-    // Validate username format
-    if (!isValidUsername(username)) {
-        return res.status(400).json({ error: 'El nombre de usuario debe tener 3-30 caracteres alfanuméricos' });
-    }
-
-    // Validate password strength
-    if (!isValidPassword(password)) {
-        return res.status(400).json({ error: PASSWORD_POLICY_MESSAGE });
-    }
-
-    try {
-        const hashedPassword = await bcrypt.hash(password, 12);
-        const userId = uuidv4();
-        const verificationRequired = isEmailDeliveryEnabled();
-        const verificationTokenData = verificationRequired ? generateSecureToken() : null;
-        const verificationTokenHash = verificationTokenData?.hash ?? null;
-        const verificationTokenExpires = verificationTokenData ? Date.now() + (24 * 60 * 60 * 1000) : null;
-
-        const registerUser = db.transaction(() => {
-            const bootstrapSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('adminBootstrapCompleted');
-            const bootstrapCompleted = bootstrapSetting?.value === 'true';
-
-            let bootstrapRequested = false;
-            if (!ALLOW_PUBLIC_REGISTRATION) {
-                if (!ADMIN_BOOTSTRAP_TOKEN || !adminBootstrapToken || !safeCompare(adminBootstrapToken, ADMIN_BOOTSTRAP_TOKEN) || bootstrapCompleted) {
-                    const err = new Error('Registro publico deshabilitado');
-                    err.status = 403;
-                    throw err;
-                }
-                bootstrapRequested = true;
-            } else if (adminBootstrapToken && ADMIN_BOOTSTRAP_TOKEN && safeCompare(adminBootstrapToken, ADMIN_BOOTSTRAP_TOKEN) && !bootstrapCompleted) {
-                bootstrapRequested = true;
-            }
-
-            const role = bootstrapRequested ? 'admin' : 'user';
-            const isVerified = verificationRequired ? 0 : 1;
-            const stmt = db.prepare('INSERT INTO users (id, email, username, passwordHash, role, isVerified, verificationToken, verificationTokenExpires, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
-            stmt.run(userId, email, username, hashedPassword, role, isVerified, verificationTokenHash, verificationTokenExpires, Date.now());
-
-            if (bootstrapRequested) {
-                db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('adminBootstrapCompleted', 'true');
-            }
-
-            return { bootstrapRequested };
-        });
-
-        const { bootstrapRequested } = registerUser();
-
-        if (verificationRequired && verificationTokenData) {
-            const verificationLink = `${PUBLIC_ORIGIN}/verify?token=${verificationTokenData.token}`;
-            await sendTemplatedEmail(email, 'welcome', {
-                username,
-                email,
-                verificationLink
-            });
-        }
-
-        const message = verificationRequired
-            ? (bootstrapRequested
-                ? 'Usuario registrado como administrador. Por favor verifica tu email.'
-                : 'Usuario registrado. Por favor verifica tu email.')
-            : (bootstrapRequested
-                ? 'Usuario registrado como administrador. El email está deshabilitado en este entorno, ya puedes iniciar sesión.'
-                : 'Usuario registrado. El email está deshabilitado en este entorno, ya puedes iniciar sesión.');
-        res.status(201).json({
-            message,
-            emailDeliveryEnabled: verificationRequired,
-            requiresEmailVerification: verificationRequired
-        });
-    } catch (err) {
-        if (err.status) {
-            return res.status(err.status).json({ error: err.message });
-        }
-        if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-            return res.status(409).json({ error: 'El email o nombre de usuario ya existe' });
-        }
-        logger.error('Error en registro', { error: err.message, stack: err.stack });
-        res.status(500).json({ error: 'Error interno del servidor' });
-    }
-}));
-
-app.post('/api/auth/login', authLimiter, asyncHandler(async (req, res) => {
-    const { login, password } = req.body; // login can be email or username
-    if (!login || !password) return res.status(400).json({ error: 'Faltan campos requeridos' });
-
-    // Basic input validation
-    if (login.length > 255 || password.length > 255) {
-        return res.status(400).json({ error: 'Datos de entrada inválidos' });
-    }
-
-    try {
-        const stmt = db.prepare('SELECT * FROM users WHERE email = ? OR username = ?');
-        const user = stmt.get(login, login);
-
-        if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
-            return res.status(401).json({ error: 'Credenciales inválidas' });
-        }
-
-        // Regenerate session to prevent session fixation attacks
-        const oldSession = req.session;
-        req.session.regenerate((err) => {
-            if (err) {
-                logger.error('Error regenerating session', { error: err.message });
-                return res.status(500).json({ error: 'Error interno del servidor' });
-            }
-
-            // Restore any session data that should persist (if any)
-            req.session.userId = user.id;
-
-            // Explicitly save session to ensure it's persisted before responding
-            req.session.save((saveErr) => {
-                if (saveErr) {
-                    logger.error('Error saving session after login', { error: saveErr.message });
-                    return res.status(500).json({ error: 'Error interno del servidor' });
-                }
-
-                logger.info('User logged in successfully', {
-                    userId: user.id,
-                    sessionId: (req.session.id || req.sessionID)?.substring(0, 8) + '...'
-                });
-
-                res.json({ message: 'Sesión iniciada correctamente', user: { id: user.id, username: user.username, email: user.email, role: user.role } });
-            });
-        });
-    } catch (err) {
-        logger.error('Error en login', { error: err.message });
-        res.status(500).json({ error: 'Error interno del servidor' });
-    }
-}));
-
-app.post('/api/auth/logout', (req, res) => {
-    req.session.destroy((err) => {
-        if (err) return res.status(500).json({ error: 'No se pudo cerrar sesión' });
-        res.clearCookie(process.env.SESSION_COOKIE_NAME || 'sendu.sid', {
-            ...(sessionCookieDomain ? { domain: sessionCookieDomain } : {})
-        });
-        res.json({ message: 'Sesión cerrada' });
-    });
-});
-
-app.get('/api/auth/me', (req, res) => {
-    // Debug logging for session issues
-    const sessionId = req.session?.id || req.sessionID;
-    const hasSessionCookie = !!(req.cookies?.[process.env.SESSION_COOKIE_NAME || 'sendu.sid']);
-
-    logger.debug('Auth check', {
-        hasSessionCookie,
-        sessionId: sessionId ? sessionId.substring(0, 8) + '...' : 'none',
-        userId: req.session?.userId || 'none',
-        cookieSecure: sessionCookieSecure,
-        cookieSameSite: sessionCookieSameSite
-    });
-
-    if (!req.session.userId) return res.status(401).json({ error: 'No autenticado' });
-
-    const stmt = db.prepare('SELECT id, username, email, role, isVerified FROM users WHERE id = ?');
-    const user = stmt.get(req.session.userId);
-
-    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-    res.json({ user });
-});
-
-// Email verification endpoint
-app.get('/api/auth/verify', (req, res) => {
-    const { token } = req.query;
-
-    if (!token) {
-        return res.status(400).json({ error: 'Token de verificación requerido' });
-    }
-
-    try {
-        // Hash the token to compare with stored hash
-        const tokenHash = hashToken(token);
-        logger.debug('Verification attempt', {
-            tokenLength: token.length,
-            tokenHashStart: tokenHash.substring(0, 16) + '...'
-        });
-
-        const user = db.prepare('SELECT id, email, verificationToken, verificationTokenExpires, isVerified FROM users WHERE verificationToken = ?').get(tokenHash);
-
-        if (!user) {
-            // Debug: Check if any user has a similar token stored
-            const allUsers = db.prepare('SELECT id, email, verificationToken, isVerified FROM users WHERE verificationToken IS NOT NULL').all();
-            logger.debug('No user found with token', {
-                searchedHash: tokenHash.substring(0, 16) + '...',
-                usersWithTokens: allUsers.length,
-                storedHashes: allUsers.map(u => u.verificationToken?.substring(0, 16) + '...')
-            });
-            return res.status(400).json({ error: 'Token de verificación inválido o expirado' });
-        }
-
-        logger.debug('User found for verification', { userId: user.id, email: user.email });
-
-        // Check expiration
-        if (user.verificationTokenExpires && Date.now() > user.verificationTokenExpires) {
-            return res.status(400).json({ error: 'El token de verificación ha expirado' });
-        }
-
-        if (user.isVerified) {
-            return res.json({ message: 'El email ya está verificado', alreadyVerified: true });
-        }
-
-        // Mark user as verified and clear token
-        db.prepare('UPDATE users SET isVerified = 1, verificationToken = NULL, verificationTokenExpires = NULL WHERE id = ?').run(user.id);
-
-        res.json({ message: 'Email verificado correctamente', success: true });
-    } catch (err) {
-        logger.error('Error', { error: err.message, stack: err.stack });
-        res.status(500).json({ error: 'Error al verificar email' });
-    }
-});
-
-// Request password reset
-app.post('/api/auth/forgot-password', passwordResetLimiter, asyncHandler(async (req, res) => {
-    const { email } = req.body;
-
-    if (!email) {
-        return res.status(400).json({ error: 'Email requerido' });
-    }
-
-    if (!isValidEmail(email)) {
-        return res.status(400).json({ error: 'Formato de email inválido' });
-    }
-
-    if (!isEmailDeliveryEnabled()) {
-        return res.status(503).json({ error: 'La recuperación de contraseña por email no está disponible en este entorno' });
-    }
-
-    try {
-        const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-
-        // Always return success to prevent email enumeration
-        if (!user) {
-            return res.json({ message: 'Si el email existe, recibirás un enlace para restablecer tu contraseña' });
-        }
-
-        // Generate secure reset token (store hash, send plain token)
-        const { token: resetToken, hash: resetTokenHash } = generateSecureToken();
-        const resetTokenExpires = Date.now() + (60 * 60 * 1000); // 1 hour
-
-        db.prepare('UPDATE users SET resetToken = ?, resetTokenExpires = ? WHERE id = ?').run(resetTokenHash, resetTokenExpires, user.id);
-
-        // Send password reset email
-        const resetLink = `${PUBLIC_ORIGIN}/reset-password?token=${resetToken}`;
-        await sendTemplatedEmail(email, 'passwordReset', {
-            username: user.username,
-            email: user.email,
-            resetLink
-        });
-
-        res.json({ message: 'Si el email existe, recibirás un enlace para restablecer tu contraseña' });
-    } catch (err) {
-        logger.error('Error', { error: err.message, stack: err.stack });
-        res.status(500).json({ error: 'Error al procesar la solicitud' });
-    }
-}));
-
-// Validate reset token
-app.get('/api/auth/reset-password/validate', (req, res) => {
-    const { token } = req.query;
-
-    if (!token) {
-        return res.status(400).json({ error: 'Token requerido', valid: false });
-    }
-
-    try {
-        // Hash the token to compare with stored hash
-        const tokenHash = hashToken(token);
-        const user = db.prepare('SELECT * FROM users WHERE resetToken = ?').get(tokenHash);
-
-        if (!user) {
-            return res.status(400).json({ error: 'Token inválido', valid: false });
-        }
-
-        if (user.resetTokenExpires && Date.now() > user.resetTokenExpires) {
-            return res.status(400).json({ error: 'El token ha expirado', valid: false });
-        }
-
-        res.json({ valid: true, username: user.username });
-    } catch (err) {
-        logger.error('Error', { error: err.message, stack: err.stack });
-        res.status(500).json({ error: 'Error al validar token', valid: false });
-    }
-});
-
-// Reset password with token
-app.post('/api/auth/reset-password', asyncHandler(async (req, res) => {
-    const { token, password } = req.body;
-
-    if (!token || !password) {
-        return res.status(400).json({ error: 'Token y contraseña requeridos' });
-    }
-
-    if (!isValidPassword(password)) {
-        return res.status(400).json({ error: PASSWORD_POLICY_MESSAGE });
-    }
-
-    try {
-        // Hash the token to compare with stored hash
-        const tokenHash = hashToken(token);
-        const user = db.prepare('SELECT * FROM users WHERE resetToken = ?').get(tokenHash);
-
-        if (!user) {
-            return res.status(400).json({ error: 'Token inválido o expirado' });
-        }
-
-        if (user.resetTokenExpires && Date.now() > user.resetTokenExpires) {
-            return res.status(400).json({ error: 'El token ha expirado' });
-        }
-
-        // Update password and clear reset token
-        const hashedPassword = await bcrypt.hash(password, 12);
-        db.prepare('UPDATE users SET passwordHash = ?, resetToken = NULL, resetTokenExpires = NULL WHERE id = ?').run(hashedPassword, user.id);
-
-        res.json({ message: 'Contraseña actualizada correctamente', success: true });
-    } catch (err) {
-        logger.error('Error', { error: err.message, stack: err.stack });
-        res.status(500).json({ error: 'Error al actualizar contraseña' });
-    }
-}));
-
-// Resend verification email
-app.post('/api/auth/resend-verification', requireAuth, asyncHandler(async (req, res) => {
-
-    try {
-        const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.session.userId);
-
-        if (!user) {
-            return res.status(404).json({ error: 'Usuario no encontrado' });
-        }
-
-        if (user.isVerified) {
-            return res.status(400).json({ error: 'El email ya está verificado' });
-        }
-
-        if (!isEmailDeliveryEnabled()) {
-            db.prepare('UPDATE users SET isVerified = 1, verificationToken = NULL, verificationTokenExpires = NULL WHERE id = ?').run(user.id);
-            return res.json({
-                message: 'La verificación por email está deshabilitada en este entorno. Tu cuenta ha sido habilitada.',
-                autoVerified: true
-            });
-        }
-
-        // Generate new verification token (store hash, send plain token)
-        const { token: verificationToken, hash: verificationTokenHash } = generateSecureToken();
-        const verificationTokenExpires = Date.now() + (24 * 60 * 60 * 1000); // 24 hours
-
-        db.prepare('UPDATE users SET verificationToken = ?, verificationTokenExpires = ? WHERE id = ?').run(verificationTokenHash, verificationTokenExpires, user.id);
-
-        // Send verification email
-        const verificationLink = `${PUBLIC_ORIGIN}/verify?token=${verificationToken}`;
-        await sendTemplatedEmail(user.email, 'verification', {
-            username: user.username,
-            email: user.email,
-            verificationLink
-        });
-
-        res.json({ message: 'Email de verificación reenviado' });
-    } catch (err) {
-        logger.error('Error', { error: err.message, stack: err.stack });
-        res.status(500).json({ error: 'Error al reenviar email de verificación' });
-    }
-}));
 
 // Upload Routes
 // (UPLOAD_DIR, CHUNKS_DIR, TEMP_DIR defined earlier for chunk router)
 
 // Helper: Get max concurrent uploads from settings
 const getMaxConcurrentUploads = () => {
-    if (!db) return 6;
-    try {
-        const setting = db.prepare('SELECT value FROM settings WHERE key = ?').get('maxConcurrentUploads');
-        const value = setting ? parseInt(setting.value) : 6;
-        return Math.max(1, value || 6);
-    } catch {
-        return 6;
-    }
+    const configuredValue = parseInt(getRuntimeSettingValue('maxConcurrentUploads'), 10);
+    return Number.isFinite(configuredValue) ? Math.max(1, configuredValue) : 6;
 };
 
 // MIME type validation - allowlist for common safe file types
@@ -1333,310 +1088,8 @@ const validateMimeType = (mimeType, filename) => {
     return { valid: true };
 };
 
-app.post('/api/upload/init', asyncHandler(async (req, res) => {
-    const { originalName, size, mimeType, totalChunks, checksum, chunkSize } = req.body;
-
-    // Validate required fields
-    if (!originalName || typeof originalName !== 'string') {
-        return res.status(400).json({ error: 'Nombre de archivo requerido' });
-    }
-    if (!size || typeof size !== 'number' || size <= 0) {
-        return res.status(400).json({ error: 'Tamaño de archivo inválido' });
-    }
-    if (!totalChunks || typeof totalChunks !== 'number' || totalChunks <= 0) {
-        return res.status(400).json({ error: 'Número de chunks inválido' });
-    }
-    if (chunkSize !== undefined && (typeof chunkSize !== 'number' || chunkSize <= 0 || chunkSize > MAX_CHUNK_UPLOAD_BYTES)) {
-        return res.status(400).json({ error: 'Tamaño de chunk inválido' });
-    }
-
-    // Sanitize filename (remove path traversal attempts)
-    const sanitizedName = path.basename(originalName).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
-    if (!sanitizedName || sanitizedName === '.' || sanitizedName === '..') {
-        return res.status(400).json({ error: 'Nombre de archivo inválido' });
-    }
-
-    // Validate MIME type and extension
-    const mimeValidation = validateMimeType(mimeType, sanitizedName);
-    if (!mimeValidation.valid) {
-        return res.status(400).json({ error: mimeValidation.reason });
-    }
-
-    // Validate file size against limits (different for guests vs registered users)
-    const limits = getUploadLimits();
-    const isLoggedIn = !!req.session.userId;
-
-    // Require verified email for authenticated uploads
-    if (isLoggedIn) {
-        const userRow = db.prepare('SELECT isVerified, role FROM users WHERE id = ?').get(req.session.userId);
-        if (!userRow) {
-            return res.status(401).json({ error: 'No autenticado' });
-        }
-        if (isEmailDeliveryEnabled() && !userRow.isVerified && userRow.role !== 'admin') {
-            return res.status(403).json({ error: 'Verifica tu email para subir archivos' });
-        }
-    }
-    let guestFingerprint = null;
-    let ipFingerprint = null;
-    const effectiveMaxFileSize = isLoggedIn ? limits.maxFileSize : limits.guestMaxFileSize;
-    const maxFileSizeBytes = effectiveMaxFileSize * 1024 * 1024;
-
-    if (size > maxFileSizeBytes) {
-        const message = isLoggedIn
-            ? `El archivo excede el límite de ${effectiveMaxFileSize}MB`
-            : `El archivo excede el límite de ${effectiveMaxFileSize}MB para invitados. Inicia sesión para subir archivos más grandes.`;
-        return res.status(400).json({ error: message });
-    }
-
-    // Check total storage quota for authenticated users
-    if (req.session.userId) {
-        const maxTotalSizeBytes = limits.maxTotalSize * 1024 * 1024;
-        const userTotalStmt = db.prepare('SELECT COALESCE(SUM(size), 0) as totalSize FROM files WHERE userId = ?');
-        const { totalSize } = userTotalStmt.get(req.session.userId);
-
-        if (totalSize + size > maxTotalSizeBytes) {
-            const usedMB = Math.round(totalSize / (1024 * 1024));
-            return res.status(400).json({
-                error: `Has alcanzado tu límite de almacenamiento (${usedMB}MB de ${limits.maxTotalSize}MB usados). Elimina algunos archivos para subir más.`,
-                quotaExceeded: true,
-                used: totalSize,
-                limit: maxTotalSizeBytes
-            });
-        }
-    }
-
-    // Check guest upload limit for non-logged users
-    if (!req.session.userId) {
-        guestFingerprint = generateFingerprint(req);
-        ipFingerprint = getIpFingerprint(req);
-        const guestLimitBytes = limits.guestUploadLimit * 1024 * 1024;
-
-        // Check both fingerprints (user might try different browsers)
-        const check1 = canGuestUpload(guestFingerprint, size, guestLimitBytes);
-        const check2 = canGuestUpload(ipFingerprint, size, guestLimitBytes);
-
-        if (!check1.allowed || !check2.allowed) {
-            return res.status(429).json({
-                error: check1.message || check2.message,
-                remaining: Math.min(check1.remaining, check2.remaining),
-                limitReached: true
-            });
-        }
-    }
-
-    // Always track IP fingerprint (limit concurrent uploads per IP)
-    if (!ipFingerprint) {
-        ipFingerprint = getIpFingerprint(req);
-    }
-
-    // Enforce backend concurrency limit
-    const maxConcurrent = getMaxConcurrentUploads();
-    if (isLoggedIn) {
-        const { count } = db.prepare(`
-            SELECT COUNT(*) as count FROM upload_sessions
-            WHERE userId = ? AND status IN ('initiated','processing')
-        `).get(req.session.userId);
-        if (count >= maxConcurrent) {
-            return res.status(429).json({ error: `Límite de uploads concurrentes (${maxConcurrent}) alcanzado.` });
-        }
-    }
-
-    // Enforce per-IP concurrency limit for all users
-    const { count: ipCount } = db.prepare(`
-        SELECT COUNT(*) as count FROM upload_sessions
-        WHERE ipFingerprint = ? AND status IN ('initiated','processing')
-    `).get(ipFingerprint);
-    if (ipCount >= maxConcurrent) {
-        return res.status(429).json({ error: `Límite de uploads concurrentes (${maxConcurrent}) alcanzado.` });
-    }
-
-    const uploadId = uuidv4();
-    const uploadPath = path.join(CHUNKS_DIR, uploadId);
-
-    // Validate expires field (must be a positive integer representing days, max 365 days)
-    let validatedExpires = null;
-    if (req.body.expires !== undefined && req.body.expires !== null && req.body.expires !== '') {
-        const expiresValue = parseInt(req.body.expires, 10);
-        if (isNaN(expiresValue) || expiresValue < 1 || expiresValue > 365) {
-            return res.status(400).json({ error: 'El valor de expiración debe ser entre 1 y 365 días' });
-        }
-        validatedExpires = expiresValue;
-    }
-
-    // Validate maxDownloads field (must be a positive integer, max 10000)
-    let validatedMaxDownloads = null;
-    if (req.body.maxDownloads !== undefined && req.body.maxDownloads !== null && req.body.maxDownloads !== '') {
-        const maxDownloadsValue = parseInt(req.body.maxDownloads, 10);
-        if (isNaN(maxDownloadsValue) || maxDownloadsValue < 1 || maxDownloadsValue > 10000) {
-            return res.status(400).json({ error: 'El límite de descargas debe ser entre 1 y 10000' });
-        }
-        validatedMaxDownloads = maxDownloadsValue;
-    }
-
-    // Hash password immediately if provided (don't store plaintext even temporarily)
-    // Use a lower cost factor for the temporary hash to avoid blocking
-    let passwordHash = null;
-    if (req.body.password && typeof req.body.password === 'string' && req.body.password.trim()) {
-        passwordHash = await bcrypt.hash(req.body.password.trim(), 12);
-    }
-
-    // Validate checksum format if provided (SHA-256 hex)
-    let validatedChecksum = null;
-    if (checksum && typeof checksum === 'string') {
-        if (/^[a-f0-9]{64}$/i.test(checksum)) {
-            validatedChecksum = checksum.toLowerCase();
-        } else {
-            return res.status(400).json({ error: 'Formato de checksum inválido (se espera SHA-256 hex)' });
-        }
-    }
-
-    await fsPromises.mkdir(uploadPath, { recursive: true });
-    await fsPromises.writeFile(path.join(uploadPath, 'meta.json'), JSON.stringify({
-        originalName: sanitizedName, // Use sanitized name
-        size,
-        mimeType,
-        totalChunks,
-        chunkSize: chunkSize || null,
-        userId: req.session.userId || null,
-        fingerprint: req.session.userId ? null : guestFingerprint,
-        ipFingerprint: req.session.userId ? null : ipFingerprint,
-        createdAt: Date.now(),
-        expires: validatedExpires,
-        maxDownloads: validatedMaxDownloads,
-        passwordHash, // Store hash, not plaintext
-        checksum: validatedChecksum
-    }));
-
-    const now = Date.now();
-    db.prepare(`
-        INSERT OR REPLACE INTO upload_sessions (uploadId, userId, ipFingerprint, status, createdAt, updatedAt)
-        VALUES (?, ?, ?, ?, ?, ?)
-    `).run(uploadId, req.session.userId || null, ipFingerprint, 'initiated', now, now);
-
-    const uploadToken = createUploadSessionToken({
-        uploadId,
-        userId: req.session.userId || null,
-        ipFingerprint,
-    });
-
-    metrics.increment('upload_init', 1);
-    res.json({ uploadId, uploadToken });
-}));
-
-app.get('/api/upload/status/:uploadId', asyncHandler(async (req, res) => {
-    const { uploadId } = req.params;
-    metrics.increment('upload_resume_probe', 1);
-
-    if (!/^[a-f0-9-]{36}$/i.test(uploadId)) {
-        return res.status(400).json({ error: 'ID de subida inválido' });
-    }
-
-    const sessionRow = db.prepare(`
-        SELECT status, fileId, userId, ipFingerprint, bytesReceived, createdAt, updatedAt
-        FROM upload_sessions
-        WHERE uploadId = ?
-    `).get(uploadId);
-
-    if (!sessionRow) {
-        return res.status(404).json({ error: 'Sesión de subida no encontrada' });
-    }
-
-    const uploadToken = req.get('x-upload-token') || req.query.uploadToken;
-    if (!validateUploadSessionToken({
-        uploadId,
-        token: uploadToken,
-        userId: sessionRow.userId || null,
-        ipFingerprint: sessionRow.ipFingerprint || null,
-    })) {
-        return res.status(403).json({ error: 'No autorizado para esta sesión de subida' });
-    }
-
-    const uploadPath = path.join(CHUNKS_DIR, uploadId);
-
-    let meta = null;
-    try {
-        const metaContent = await fsPromises.readFile(path.join(uploadPath, 'meta.json'), 'utf8');
-        meta = JSON.parse(metaContent);
-    } catch (err) {
-        if (sessionRow.status !== 'completed') {
-            return res.status(404).json({ error: 'Metadatos de la sesión no disponibles' });
-        }
-    }
-
-    let completedChunks = [];
-    let uploadedBytes = 0;
-    if (meta) {
-        try {
-            const entries = await fsPromises.readdir(uploadPath);
-            for (const entry of entries) {
-                const match = entry.match(/^(\d+)\.part$/);
-                if (!match) continue;
-
-                const chunkIndex = parseInt(match[1], 10);
-                if (Number.isNaN(chunkIndex)) continue;
-
-                try {
-                    const chunkPath = path.join(uploadPath, entry);
-                    const stat = await fsPromises.stat(chunkPath);
-                    const configuredChunkSize = Number.isFinite(meta.chunkSize) && meta.chunkSize > 0
-                        ? meta.chunkSize
-                        : Math.ceil(meta.size / Math.max(meta.totalChunks || 1, 1));
-                    const expectedSize = chunkIndex === (meta.totalChunks - 1)
-                        ? Math.max(0, meta.size - (configuredChunkSize * chunkIndex))
-                        : configuredChunkSize;
-
-                    if (stat.size === expectedSize) {
-                        completedChunks.push(chunkIndex);
-                        uploadedBytes += stat.size;
-                        continue;
-                    }
-
-                    logger.warn('Ignoring partial chunk during resume probe', {
-                        uploadId,
-                        chunkIndex,
-                        expectedSize,
-                        actualSize: stat.size
-                    });
-                } catch {
-                    // Ignore races with cleanup/resume
-                }
-            }
-            completedChunks.sort((a, b) => a - b);
-        } catch {
-            // Ignore listing races; rely on DB bytes below
-        }
-    }
-
-    if (completedChunks.length > 0) {
-        metrics.increment('upload_resume_available', 1);
-    }
-
-    res.json({
-        uploadId,
-        status: sessionRow.status,
-        fileId: sessionRow.fileId || null,
-        createdAt: sessionRow.createdAt,
-        updatedAt: sessionRow.updatedAt,
-        bytesReceived: uploadedBytes || sessionRow.bytesReceived || 0,
-        completedChunks,
-        totalChunks: meta?.totalChunks ?? null,
-        size: meta?.size ?? null,
-        originalName: meta?.originalName ?? null,
-        mimeType: meta?.mimeType ?? null,
-    });
-}));
-
 // NOTE: Chunk size validation is handled by the optimized chunkRouter
 // The following multer and error handler are used only for branding uploads
-
-// Multer with dynamic file size limit based on chunk size setting
-// We use a generous limit (200MB) to support large adaptive chunks
-const upload = multer({
-    dest: TEMP_DIR,
-    limits: {
-        fileSize: 200 * 1024 * 1024 // 200MB max to support large chunks
-    }
-});
 
 // Multer error handler middleware
 const handleMulterError = (err, req, res, next) => {
@@ -1657,572 +1110,53 @@ const handleMulterError = (err, req, res, next) => {
 // NOTE: /api/upload/chunk is handled by the optimized chunkRouter mounted earlier
 // This avoids passing through helmet, compression, session, csrf, and httpLogger
 
-app.post('/api/upload/complete', asyncHandler(async (req, res) => {
-    const { uploadId } = req.body;
-
-    if (!uploadId) {
-        return res.status(400).json({ error: 'Se requiere el ID de subida' });
-    }
-
-    if (!/^[a-f0-9-]{36}$/i.test(uploadId)) {
-        return res.status(400).json({ error: 'ID de subida inválido' });
-    }
-
-    // Invalidar caché inmediatamente
-    invalidateUploadCache(uploadId);
-
-    const sessionRow = db.prepare('SELECT status, fileId, userId, ipFingerprint FROM upload_sessions WHERE uploadId = ?').get(uploadId);
-    if (!sessionRow || sessionRow.status === 'cancelled') {
-        return res.status(404).json({ error: 'Sesión de subida no encontrada' });
-    }
-
-    if (sessionRow.userId) {
-        if (!req.session.userId || req.session.userId !== sessionRow.userId) {
-            return res.status(403).json({ error: 'No autorizado para completar esta subida' });
-        }
-    } else {
-        const requestFingerprint = getIpFingerprint(req);
-        if (!sessionRow.ipFingerprint || sessionRow.ipFingerprint !== requestFingerprint) {
-            return res.status(403).json({ error: 'No autorizado para completar esta subida' });
-        }
-    }
-
-    if (sessionRow.status === 'completed' && sessionRow.fileId) {
-        return res.json({ fileId: sessionRow.fileId, message: 'Subida completada' });
-    }
-    if (sessionRow.status === 'processing') {
-        return res.status(409).json({ error: 'Subida en proceso, intenta de nuevo' });
-    }
-
-    const statusUpdate = db.prepare(`
-        UPDATE upload_sessions SET status = 'processing', updatedAt = ?
-        WHERE uploadId = ? AND status IN ('initiated','failed')
-    `).run(Date.now(), uploadId);
-    if (statusUpdate.changes === 0) {
-        return res.status(409).json({ error: 'Subida en proceso, intenta de nuevo' });
-    }
-
-    const uploadPath = path.join(CHUNKS_DIR, uploadId);
-
-    try {
-        await fsPromises.access(uploadPath);
-    } catch {
-        db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('failed', Date.now(), uploadId);
-        return res.status(404).json({ error: 'Sesión de subida no encontrada' });
-    }
-
-    let meta;
-    try {
-        const metaContent = await fsPromises.readFile(path.join(uploadPath, 'meta.json'), 'utf8');
-        meta = JSON.parse(metaContent);
-    } catch (err) {
-        db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('failed', Date.now(), uploadId);
-        return res.status(400).json({ error: 'Sesión de subida inválida: faltan metadatos' });
-    }
-
-    // Check disk space before assembling
-    try {
-        const { free } = await checkDiskSpace(UPLOAD_DIR);
-        const safetyBytes = 50 * 1024 * 1024; // 50MB safety buffer
-        if (free < meta.size + safetyBytes) {
-            db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('failed', Date.now(), uploadId);
-            return res.status(507).json({ error: 'Espacio insuficiente en el servidor' });
-        }
-    } catch (err) {
-        logger.warn('Disk space check failed', { error: err.message });
-    }
-
-    const finalFileId = uuidv4();
-    const finalPath = path.join(UPLOAD_DIR, finalFileId);
-    const tempPath = path.join(UPLOAD_DIR, `${finalFileId}.tmp`);
-
-    try {
-        // Verify all chunks exist before starting assembly
-        for (let i = 0; i < meta.totalChunks; i++) {
-            const chunkPath = path.join(uploadPath, `${i}.part`);
-            try {
-                await fsPromises.access(chunkPath);
-            } catch {
-                throw new Error(`Missing chunk ${i}`);
-            }
-        }
-
-        // Assemble file using streams to avoid loading entire file into memory
-        const writeStream = fs.createWriteStream(tempPath);
-
-        for (let i = 0; i < meta.totalChunks; i++) {
-            const chunkPath = path.join(uploadPath, `${i}.part`);
-            await new Promise((resolve, reject) => {
-                const readStream = fs.createReadStream(chunkPath);
-                readStream.on('error', reject);
-                readStream.on('end', resolve);
-                readStream.pipe(writeStream, { end: false });
-            });
-        }
-
-        // Close the write stream
-        await new Promise((resolve, reject) => {
-            writeStream.on('finish', resolve);
-            writeStream.on('error', reject);
-            writeStream.end();
-        });
-
-        // Clean up chunks directory
-        await fsPromises.rm(uploadPath, { recursive: true, force: true });
-
-        let expiresAt = null;
-        if (meta.expires) {
-            // expires is already validated as integer in /init
-            expiresAt = Date.now() + (meta.expires * 24 * 60 * 60 * 1000);
-        } else {
-            // Apply server-wide default retention if configured
-            const defaultRetention = db.prepare('SELECT value FROM settings WHERE key = ?').get('defaultRetentionDays');
-            if (defaultRetention?.value) {
-                const days = parseInt(defaultRetention.value, 10);
-                if (days > 0 && days <= 365) {
-                    expiresAt = Date.now() + (days * 24 * 60 * 60 * 1000);
-                }
-            }
-        }
-
-        // Use the password hash stored during /init (already hashed, no plaintext)
-        const passwordHash = meta.passwordHash || null;
-
-        // Verify final file size matches expected size (strict)
-        const finalStats = await fsPromises.stat(tempPath);
-        if (finalStats.size !== meta.size) {
-            logger.warn('File size mismatch', {
-                expected: meta.size,
-                actual: finalStats.size,
-                uploadId
-            });
-            await fsPromises.unlink(tempPath);
-            db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('failed', Date.now(), uploadId);
-            return res.status(400).json({
-                error: 'El tamaño del archivo no coincide con lo esperado. Por favor, intenta de nuevo.'
-            });
-        }
-
-        // Verify checksum if provided during /init (SHA-256)
-        if (meta.checksum) {
-            const hash = crypto.createHash('sha256');
-            const stream = fs.createReadStream(tempPath);
-            await new Promise((resolve, reject) => {
-                stream.on('data', (chunk) => hash.update(chunk));
-                stream.on('end', resolve);
-                stream.on('error', reject);
-            });
-            const computed = hash.digest('hex');
-            if (computed !== meta.checksum) {
-                logger.warn('Checksum mismatch', { expected: meta.checksum, actual: computed, uploadId });
-                await fsPromises.unlink(tempPath);
-                db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('failed', Date.now(), uploadId);
-                return res.status(400).json({
-                    error: 'El checksum del archivo no coincide. El archivo puede estar corrupto.'
-                });
-            }
-        }
-
-        // Detect real file type from content (security validation)
-        let detectedMime = meta.mimeType;
-        try {
-            const detected = await fileTypeFromFile(tempPath);
-            if (detected?.mime) {
-                detectedMime = detected.mime;
-            }
-        } catch { }
-
-        const mimeValidation = validateMimeType(detectedMime, meta.originalName);
-        if (!mimeValidation.valid) {
-            await fsPromises.unlink(tempPath);
-            db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('failed', Date.now(), uploadId);
-            return res.status(400).json({ error: mimeValidation.reason });
-        }
-
-        // Optional antivirus scan (fail-closed when enabled)
-        try {
-            const avResult = await antivirus.scanFile(tempPath);
-            if (avResult.enabled && !avResult.clean) {
-                await fsPromises.unlink(tempPath);
-                db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('failed', Date.now(), uploadId);
-                return res.status(400).json({ error: 'Archivo detectado como malicioso' });
-            }
-        } catch {
-            if (antivirus.isEnabled()) {
-                await fsPromises.unlink(tempPath);
-                db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('failed', Date.now(), uploadId);
-                return res.status(503).json({ error: 'Escaneo antivirus no disponible' });
-            }
-        }
-
-        // Rename file to final path first, then insert DB record
-        // (if crash occurs between rename and INSERT, cleanup will remove orphan files)
-        try {
-            await fsPromises.rename(tempPath, finalPath);
-        } catch (err) {
-            throw err;
-        }
-
-        const stmt = db.prepare(`
-            INSERT INTO files (id, originalName, serverPath, mimeType, size, createdAt, userId, expiresAt, maxDownloads, passwordHash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-        try {
-            stmt.run(finalFileId, meta.originalName, finalPath, detectedMime || meta.mimeType, meta.size, Date.now(), meta.userId, expiresAt, meta.maxDownloads || null, passwordHash);
-        } catch (err) {
-            // Rollback: remove renamed file if DB insert fails
-            try { await fsPromises.unlink(finalPath); } catch {}
-            throw err;
-        }
-
-        db.prepare('UPDATE upload_sessions SET status = ?, fileId = ?, updatedAt = ? WHERE uploadId = ?')
-            .run('completed', finalFileId, Date.now(), uploadId);
-
-        // Record guest upload after successful completion
-        if (!meta.userId && meta.fingerprint) {
-            recordGuestUpload(meta.fingerprint, meta.size);
-            if (meta.ipFingerprint && meta.ipFingerprint !== meta.fingerprint) {
-                recordGuestUpload(meta.ipFingerprint, meta.size);
-            }
-        }
-
-        metrics.increment('upload_complete', 1);
-        metrics.increment('upload_complete_bytes', meta.size || 0);
-        res.json({ fileId: finalFileId, message: 'Subida completada' });
-
-    } catch (err) {
-        logger.error('Error al completar subida', { error: err.message });
-        // Clean up on error
-        try {
-            await fsPromises.rm(uploadPath, { recursive: true, force: true });
-        } catch { }
-        try {
-            await fsPromises.unlink(tempPath);
-        } catch { }
-        db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('failed', Date.now(), uploadId);
-        res.status(500).json({ error: err.message || 'Error al completar la subida' });
-    }
-}));
-
-// Cancel upload and clean up chunks
-app.post('/api/upload/cancel', asyncHandler(async (req, res) => {
-    const { uploadId } = req.body;
-
-    if (!uploadId) {
-        return res.status(400).json({ error: 'Se requiere el ID de subida' });
-    }
-
-    // Validate uploadId format to prevent path traversal
-    if (!/^[a-f0-9-]{36}$/i.test(uploadId)) {
-        return res.status(400).json({ error: 'ID de subida inválido' });
-    }
-
-    // Invalidar caché inmediatamente
-    invalidateUploadCache(uploadId);
-
-    const sessionRow = db.prepare('SELECT userId, ipFingerprint FROM upload_sessions WHERE uploadId = ?').get(uploadId);
-    if (!sessionRow) {
-        return res.status(404).json({ error: 'Sesion de subida no encontrada' });
-    }
-
-    if (sessionRow.userId) {
-        if (!req.session.userId || req.session.userId !== sessionRow.userId) {
-            return res.status(403).json({ error: 'No autorizado para cancelar esta subida' });
-        }
-    } else {
-        const requestFingerprint = getIpFingerprint(req);
-        if (!sessionRow.ipFingerprint || sessionRow.ipFingerprint !== requestFingerprint) {
-            return res.status(403).json({ error: 'No autorizado para cancelar esta subida' });
-        }
-    }
-
-    const uploadPath = path.join(CHUNKS_DIR, uploadId);
-
-    try {
-        await fsPromises.rm(uploadPath, { recursive: true, force: true });
-        db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('cancelled', Date.now(), uploadId);
-        logger.info('Upload cancelled and cleaned up', { uploadId });
-        metrics.increment('upload_cancel', 1);
-        res.json({ message: 'Subida cancelada' });
-    } catch (err) {
-        // If folder doesn't exist, that's fine
-        if (err.code === 'ENOENT') {
-            db.prepare('UPDATE upload_sessions SET status = ?, updatedAt = ? WHERE uploadId = ?').run('cancelled', Date.now(), uploadId);
-            metrics.increment('upload_cancel', 1);
-            return res.json({ message: 'Subida cancelada' });
-        }
-        logger.error('Error cancelling upload', { uploadId, error: err.message });
-        res.status(500).json({ error: 'Error al cancelar la subida' });
-    }
-}));
-
-// ... (previous code)
-
-
-
-// Download Routes
-const sendTrackedDownload = (req, res, file) => {
-    metrics.increment('download_start', 1);
-
-    res.download(file.serverPath, file.originalName, (err) => {
-        if (err) {
-            const isClientAbort = err.code === 'ECONNABORTED' || err.message?.includes('Request aborted');
-            if (isClientAbort) {
-                metrics.increment('download_abort', 1);
-                logger.warn('Download aborted by client', { fileId: file.id, error: err.message });
-                return;
-            }
-
-            metrics.increment('download_fail', 1);
-
-            if (err.code === 'ENOENT') {
-                logger.error('Download file missing on disk', { fileId: file.id, serverPath: file.serverPath });
-                if (!res.headersSent) {
-                    return res.status(404).json({ error: 'Archivo no disponible' });
-                }
-                return;
-            }
-
-            logger.error('Download failed', { fileId: file.id, error: err.message, code: err.code });
-            if (!res.headersSent) {
-                return res.status(500).json({ error: 'Error al descargar archivo' });
-            }
-            return;
-        }
-
-        db.prepare('UPDATE files SET downloadCount = downloadCount + 1 WHERE id = ?').run(file.id);
-        metrics.increment('download_complete', 1);
-    });
-};
-
-app.get('/api/meta/:id', (req, res) => {
-    const { id } = req.params;
-    const stmt = db.prepare('SELECT id, originalName, size, mimeType, createdAt, expiresAt, maxDownloads, downloadCount, userId, passwordHash FROM files WHERE id = ?');
-    const file = stmt.get(id);
-
-    if (!file) return res.status(404).json({ error: 'Archivo no encontrado' });
-
-    // Check expiration
-    if (file.expiresAt && Date.now() > file.expiresAt) {
-        return res.status(410).json({ error: 'El archivo ha expirado' });
-    }
-
-    // Check download limit
-    if (file.maxDownloads && file.downloadCount >= file.maxDownloads) {
-        return res.status(410).json({ error: 'Límite de descargas alcanzado' });
-    }
-
-    const isOwner = req.session.userId && req.session.userId === file.userId;
-    const hasPassword = !!file.passwordHash;
-
-    res.json({
-        id: file.id,
-        originalName: file.originalName,
-        size: file.size,
-        mimeType: file.mimeType,
-        createdAt: file.createdAt,
-        expiresAt: file.expiresAt,
-        hasPassword,
-        isOwner
-    });
+registerUploadRoutes({
+    app,
+    asyncHandler,
+    getSettingsRepository,
+    getUsersRepository,
+    getUploadSessionsRepository,
+    getFilesRepository,
+    fs,
+    fsPromises,
+    crypto,
+    bcrypt,
+    uuidv4,
+    logger,
+    metrics,
+    checkDiskSpace,
+    fileTypeFromFile,
+    antivirus,
+    invalidateUploadCache,
+    validateMimeType,
+    getUploadLimits,
+    getMaxConcurrentUploads,
+    isEmailDeliveryEnabled,
+    generateFingerprint,
+    getIpFingerprint,
+    canGuestUpload,
+    recordGuestUpload,
+    createUploadSessionToken,
+    validateUploadSessionToken,
+    UPLOAD_DIR,
+    CHUNKS_DIR,
 });
-
-// Download tokens are now stored in SQLite via persistentStores.js
-// This provides persistence across restarts and works with multiple replicas
-
-// Validate password and get temporary download token
-app.post('/api/download/:id/validate', downloadValidateLimiter, async (req, res) => {
-    const { id } = req.params;
-    const { password } = req.body;
-
-    const stmt = db.prepare('SELECT * FROM files WHERE id = ?');
-    const file = stmt.get(id);
-
-    if (!file) return res.status(404).json({ error: 'Archivo no encontrado' });
-
-    // Check expiration
-    if (file.expiresAt && Date.now() > file.expiresAt) {
-        return res.status(410).json({ error: 'El archivo ha expirado' });
-    }
-
-    // Check download limit
-    if (file.maxDownloads && file.downloadCount >= file.maxDownloads) {
-        return res.status(410).json({ error: 'Límite de descargas alcanzado' });
-    }
-
-    // Verify password
-    if (!file.passwordHash) {
-        return res.status(400).json({ error: 'Este archivo no requiere contraseña' });
-    }
-
-    if (!password) return res.status(401).json({ error: 'Contraseña requerida' });
-    const match = await bcrypt.compare(password, file.passwordHash);
-    if (!match) return res.status(401).json({ error: 'Contraseña incorrecta' });
-
-    // Generate temporary token valid for 5 minutes (stored in SQLite)
-    const token = createDownloadToken(id, 5 * 60 * 1000);
-
-    res.cookie('sendu_download_token', token, {
-        httpOnly: true,
-        secure: requestUsesSecureCookies(req),
-        sameSite: isProduction ? 'strict' : 'lax',
-        maxAge: 5 * 60 * 1000,
-        path: `/api/download/${id}`
-    });
-
-    res.json({ message: 'Token generado' });
-});
-
-// GET download - supports direct download and token-based download
-app.get('/api/download/:id', async (req, res) => {
-    const { id } = req.params;
-    const authHeader = req.get('authorization');
-    const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
-    const token = req.cookies?.sendu_download_token || req.get('x-download-token') || bearerToken || null;
-
-    const stmt = db.prepare('SELECT * FROM files WHERE id = ?');
-    const file = stmt.get(id);
-
-    if (!file) return res.status(404).json({ error: 'Archivo no encontrado' });
-
-    // Check expiration
-    if (file.expiresAt && Date.now() > file.expiresAt) {
-        return res.status(410).json({ error: 'El archivo ha expirado' });
-    }
-
-    // Check download limit
-    if (file.maxDownloads && file.downloadCount >= file.maxDownloads) {
-        return res.status(410).json({ error: 'Límite de descargas alcanzado' });
-    }
-
-    // If file has password, require valid token
-    if (file.passwordHash) {
-        if (!token) {
-            return res.status(401).json({ error: 'Se requiere autenticación para este archivo' });
-        }
-
-        // Validate token from SQLite store (single-use)
-        if (!validateDownloadToken(token, id)) {
-            return res.status(401).json({ error: 'Token inválido o expirado' });
-        }
-    }
-
-    // Clear one-time download cookie
-    res.clearCookie('sendu_download_token', {
-        path: `/api/download/${id}`
-    });
-
-    // Send file with proper headers for download
-    sendTrackedDownload(req, res, file);
-});
-
-// Legacy POST download (kept for backwards compatibility)
-app.post('/api/download/:id', downloadValidateLimiter, async (req, res) => {
-    const { id } = req.params;
-    const { password } = req.body;
-
-    const stmt = db.prepare('SELECT * FROM files WHERE id = ?');
-    const file = stmt.get(id);
-
-    if (!file) return res.status(404).json({ error: 'Archivo no encontrado' });
-
-    // Check expiration
-    if (file.expiresAt && Date.now() > file.expiresAt) {
-        return res.status(410).json({ error: 'El archivo ha expirado' });
-    }
-
-    // Check download limit
-    if (file.maxDownloads && file.downloadCount >= file.maxDownloads) {
-        return res.status(410).json({ error: 'Límite de descargas alcanzado' });
-    }
-
-    // Verify password if set
-    if (file.passwordHash) {
-        if (!password) return res.status(401).json({ error: 'Contraseña requerida' });
-        const match = await bcrypt.compare(password, file.passwordHash);
-        if (!match) return res.status(401).json({ error: 'Contraseña incorrecta' });
-    }
-
-    // Send file
-    sendTrackedDownload(req, res, file);
-});
-
-// User Files Route (with pagination)
-app.get('/api/user/files', requireAuth, (req, res) => {
-
-    // Pagination
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
-    const offset = (page - 1) * limit;
-
-    // Get total count
-    const countStmt = db.prepare('SELECT COUNT(*) as total FROM files WHERE userId = ?');
-    const { total } = countStmt.get(req.session.userId);
-
-    // Get paginated files
-    const stmt = db.prepare('SELECT * FROM files WHERE userId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?');
-    const files = stmt.all(req.session.userId, limit, offset).map(serializeFileForClient);
-
-    res.json({
-        files,
-        pagination: {
-            page,
-            limit,
-            total,
-            totalPages: Math.ceil(total / limit)
-        }
-    });
-});
-
-app.delete('/api/files/:id', requireAuth, asyncHandler(async (req, res) => {
-
-    const { id } = req.params;
-    const stmt = db.prepare('SELECT * FROM files WHERE id = ?');
-    const file = stmt.get(id);
-
-    if (!file) return res.status(404).json({ error: 'Archivo no encontrado' });
-
-    // Check ownership or admin
-    const userStmt = db.prepare('SELECT role FROM users WHERE id = ?');
-    const user = userStmt.get(req.session.userId);
-
-    if (file.userId !== req.session.userId && user.role !== 'admin') {
-        return res.status(403).json({ error: 'Acceso denegado' });
-    }
-
-    // Delete from DB
-    const deleteStmt = db.prepare('DELETE FROM files WHERE id = ?');
-    deleteStmt.run(id);
-
-    // Delete from disk asynchronously
-    try {
-        await fsPromises.unlink(file.serverPath);
-    } catch (err) {
-        if (err.code !== 'ENOENT') {
-            logger.warn('Error deleting file from disk', { fileId: id, error: err.message });
-        }
-    }
-
-    res.json({ message: 'Archivo eliminado' });
-}));
 
 // Admin Routes
-const requireAdmin = (req, res, next) => {
+const requireAdmin = asyncHandler(async (req, res, next) => {
     if (!req.session.userId) return res.status(401).json({ error: 'No autenticado' });
-    const stmt = db.prepare('SELECT role FROM users WHERE id = ?');
-    const user = stmt.get(req.session.userId);
-    if (!user || user.role !== 'admin') return res.status(403).json({ error: 'Acceso denegado' });
+    const role = await getUsersRepository().getRoleById(req.session.userId);
+    if (role !== 'admin') return res.status(403).json({ error: 'Acceso denegado' });
     next();
-};
+});
 
-const hasAdminSession = (req) => {
+const hasAdminSession = async (req) => {
     if (!req.session?.userId) {
         return false;
     }
 
-    const stmt = db.prepare('SELECT role FROM users WHERE id = ?');
-    const user = stmt.get(req.session.userId);
-    return Boolean(user && user.role === 'admin');
+    const role = await getUsersRepository().getRoleById(req.session.userId);
+    return role === 'admin';
 };
 
 const getMetricsRequestToken = (req) => {
@@ -2246,8 +1180,8 @@ const getMetricsRequestToken = (req) => {
     return '';
 };
 
-const canAccessExportedMetrics = (req) => {
-    if (hasAdminSession(req)) {
+const canAccessExportedMetrics = async (req) => {
+    if (await hasAdminSession(req)) {
         return true;
     }
 
@@ -2259,632 +1193,104 @@ const canAccessExportedMetrics = (req) => {
     return safeCompare(providedToken, METRICS_EXPORT_TOKEN);
 };
 
-app.get('/api/admin/stats', requireAdmin, (req, res) => {
-    const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
-    const fileCount = db.prepare('SELECT COUNT(*) as count FROM files').get().count;
-    const totalSize = db.prepare('SELECT SUM(size) as size FROM files').get().size || 0;
-
-    res.json({ userCount, fileCount, totalSize });
+registerDownloadRoutes({
+    app,
+    getFilesRepository,
+    metrics,
+    logger,
+    downloadValidateLimiter,
+    createDownloadToken,
+    validateDownloadToken,
+    bcrypt,
+    requestUsesSecureCookies,
+    isProduction,
 });
 
-app.get('/api/admin/users', requireAdmin, (req, res) => {
-    const users = db.prepare('SELECT id, email, username, role, isVerified, createdAt FROM users').all();
-    res.json({ users });
+registerFileRoutes({
+    app,
+    requireAuth,
+    requireAdmin,
+    asyncHandler,
+    getFilesRepository,
+    getUsersRepository,
+    serializeFileForClient,
+    fsPromises,
+    logger,
 });
 
-// Update user
-app.put('/api/admin/users/:id', requireAdmin, (req, res) => {
-    const { id } = req.params;
-    const { email, username } = req.body;
-
-    // Validate email format
-    if (!email || typeof email !== 'string') {
-        return res.status(400).json({ error: 'Email requerido' });
-    }
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email) || email.length > 255) {
-        return res.status(400).json({ error: 'Formato de email inválido' });
-    }
-
-    // Validate username format (alphanumeric, underscores, 3-30 chars)
-    if (!username || typeof username !== 'string') {
-        return res.status(400).json({ error: 'Username requerido' });
-    }
-    const usernameRegex = /^[a-zA-Z0-9_]{3,30}$/;
-    if (!usernameRegex.test(username)) {
-        return res.status(400).json({ error: 'Username inválido (3-30 caracteres alfanuméricos o guion bajo)' });
-    }
-
-    try {
-        const stmt = db.prepare('UPDATE users SET email = ?, username = ? WHERE id = ?');
-        stmt.run(email.toLowerCase().trim(), username.trim(), id);
-        res.json({ message: 'Usuario actualizado' });
-    } catch (err) {
-        if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-            return res.status(409).json({ error: 'Email o username ya existe' });
-        }
-        logger.error('Error', { error: err.message, stack: err.stack });
-        res.status(500).json({ error: 'Error al actualizar usuario' });
-    }
+registerAdminUserRoutes({
+    app,
+    requireAdmin,
+    asyncHandler,
+    getUsersRepository,
+    logger,
+    fsPromises,
+    bcrypt,
+    isValidEmail,
+    isValidUsername,
+    isValidPassword,
+    PASSWORD_POLICY_MESSAGE,
+    generateSecureToken,
+    isEmailDeliveryEnabled,
+    sendTemplatedEmail,
+    PUBLIC_ORIGIN,
 });
 
-// Delete user
-app.delete('/api/admin/users/:id', requireAdmin, asyncHandler(async (req, res) => {
-    const { id } = req.params;
-
-    // Prevent deleting yourself
-    if (id === req.session.userId) {
-        return res.status(400).json({ error: 'No puedes eliminarte a ti mismo' });
-    }
-
-    try {
-        // Delete user's files first
-        const userFiles = db.prepare('SELECT id, serverPath FROM files WHERE userId = ?').all(id);
-        for (const file of userFiles) {
-            try {
-                await fsPromises.unlink(file.serverPath);
-            } catch (err) {
-                if (err.code !== 'ENOENT') {
-                    logger.warn('Error deleting user file', { fileId: file.id, error: err.message });
-                }
-            }
-        }
-        db.prepare('DELETE FROM files WHERE userId = ?').run(id);
-
-        // Delete user
-        db.prepare('DELETE FROM users WHERE id = ?').run(id);
-        res.json({ message: 'Usuario eliminado' });
-    } catch (err) {
-        logger.error('Error', { error: err.message, stack: err.stack });
-        res.status(500).json({ error: 'Error al eliminar usuario' });
-    }
-}));
-
-// Toggle user role (admin/user)
-app.post('/api/admin/users/:id/toggle-role', requireAdmin, (req, res) => {
-    const { id } = req.params;
-
-    // Prevent changing your own role
-    if (id === req.session.userId) {
-        return res.status(400).json({ error: 'No puedes cambiar tu propio rol' });
-    }
-
-    try {
-        const user = db.prepare('SELECT role FROM users WHERE id = ?').get(id);
-        if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-
-        const newRole = user.role === 'admin' ? 'user' : 'admin';
-        db.prepare('UPDATE users SET role = ? WHERE id = ?').run(newRole, id);
-        res.json({ message: 'Rol actualizado', role: newRole });
-    } catch (err) {
-        logger.error('Error', { error: err.message, stack: err.stack });
-        res.status(500).json({ error: 'Error al cambiar rol' });
-    }
+registerAdminSettingsRoutes({
+    app,
+    requireAdmin,
+    asyncHandler,
+    getDb: () => db,
+    getSettingsRepository,
+    logger,
+    resetRateLimits,
+    applyAdminSettings,
+    serializeAdminSettings,
+    validateAdminSettingsPayload,
+    invalidateSettingsCache,
+    safeCompare,
+    encrypt,
+    decrypt,
+    isEncrypted,
+    getEncryptionFormat,
+    mergeSmtpIntoSettings,
+    getSmtpEnvironmentConfig,
+    multer,
+    BRANDING_DIR,
+    PUBLIC_ORIGIN,
+    enqueueBrandingConversion,
+    fsPromises,
+    handleMulterError,
+    isEmailDeliveryEnabled,
+    createSmtpTransporter,
+    sendEmail,
 });
-
-// Toggle user verified status
-app.post('/api/admin/users/:id/toggle-verified', requireAdmin, (req, res) => {
-    const { id } = req.params;
-
-    try {
-        const user = db.prepare('SELECT isVerified FROM users WHERE id = ?').get(id);
-        if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-
-        const newVerified = user.isVerified ? 0 : 1;
-        db.prepare('UPDATE users SET isVerified = ? WHERE id = ?').run(newVerified, id);
-        res.json({ message: 'Estado de verificación actualizado', isVerified: newVerified });
-    } catch (err) {
-        logger.error('Error', { error: err.message, stack: err.stack });
-        res.status(500).json({ error: 'Error al cambiar verificación' });
-    }
-});
-
-// Reset user password
-app.post('/api/admin/users/:id/reset-password', requireAdmin, async (req, res) => {
-    const { id } = req.params;
-    const { password } = req.body;
-
-    if (!password || !isValidPassword(password)) {
-        return res.status(400).json({ error: PASSWORD_POLICY_MESSAGE });
-    }
-
-    try {
-        const hashedPassword = await bcrypt.hash(password, 12);
-        db.prepare('UPDATE users SET passwordHash = ? WHERE id = ?').run(hashedPassword, id);
-        res.json({ message: 'Contraseña actualizada' });
-    } catch (err) {
-        logger.error('Error', { error: err.message, stack: err.stack });
-        res.status(500).json({ error: 'Error al cambiar contraseña' });
-    }
-});
-
-// Admin: Send verification email to user
-app.post('/api/admin/users/:id/send-verification', requireAdmin, asyncHandler(async (req, res) => {
-    const { id } = req.params;
-
-    try {
-        const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
-        if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-
-        if (user.isVerified) {
-            return res.status(400).json({ error: 'El usuario ya está verificado' });
-        }
-
-        if (!isEmailDeliveryEnabled()) {
-            return res.status(503).json({ error: 'La verificación por email no está disponible mientras SMTP no esté configurado' });
-        }
-
-        // Generate new verification token (store hash, send plain token)
-        const { token: verificationToken, hash: verificationTokenHash } = generateSecureToken();
-        const verificationTokenExpires = Date.now() + (24 * 60 * 60 * 1000); // 24 hours
-
-        db.prepare('UPDATE users SET verificationToken = ?, verificationTokenExpires = ? WHERE id = ?').run(verificationTokenHash, verificationTokenExpires, id);
-
-        logger.info('Verification token updated for user', {
-            userId: id,
-            email: user.email,
-            tokenHashStart: verificationTokenHash.substring(0, 16) + '...',
-            expires: new Date(verificationTokenExpires).toISOString()
-        });
-
-        // Send verification email
-        const verificationLink = `${PUBLIC_ORIGIN}/verify?token=${verificationToken}`;
-        logger.debug('Verification link generated', {
-            link: verificationLink.substring(0, 50) + '...',
-            tokenStart: verificationToken.substring(0, 16) + '...'
-        });
-
-        await sendTemplatedEmail(user.email, 'verification', {
-            username: user.username,
-            email: user.email,
-            verificationLink
-        });
-
-        res.json({ message: 'Email de verificación enviado' });
-    } catch (err) {
-        logger.error('Error', { error: err.message, stack: err.stack });
-        res.status(500).json({ error: 'Error al enviar email de verificación' });
-    }
-}));
-
-// Admin: Send password reset email to user
-app.post('/api/admin/users/:id/send-reset', requireAdmin, asyncHandler(async (req, res) => {
-    const { id } = req.params;
-
-    try {
-        const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
-        if (!user) return res.status(404).json({ error: 'Usuario no encontrado' });
-
-        if (!isEmailDeliveryEnabled()) {
-            return res.status(503).json({ error: 'La recuperación por email no está disponible mientras SMTP no esté configurado' });
-        }
-
-        // Generate reset token (store hash, send plain token)
-        const { token: resetToken, hash: resetTokenHash } = generateSecureToken();
-        const resetTokenExpires = Date.now() + (60 * 60 * 1000); // 1 hour
-
-        db.prepare('UPDATE users SET resetToken = ?, resetTokenExpires = ? WHERE id = ?').run(resetTokenHash, resetTokenExpires, id);
-
-        // Send password reset email
-        const resetLink = `${PUBLIC_ORIGIN}/reset-password?token=${resetToken}`;
-        await sendTemplatedEmail(user.email, 'passwordReset', {
-            username: user.username,
-            email: user.email,
-            resetLink
-        });
-
-        res.json({ message: 'Email de reseteo de contraseña enviado' });
-    } catch (err) {
-        logger.error('Error', { error: err.message, stack: err.stack });
-        res.status(500).json({ error: 'Error al enviar email de reseteo' });
-    }
-}));
-
-app.get('/api/admin/files', requireAdmin, (req, res) => {
-    // Pagination
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
-    const offset = (page - 1) * limit;
-
-    // Get total count
-    const { total } = db.prepare('SELECT COUNT(*) as total FROM files').get();
-
-    // Get paginated files
-    const files = db.prepare('SELECT * FROM files ORDER BY createdAt DESC LIMIT ? OFFSET ?')
-        .all(limit, offset)
-        .map(serializeFileForClient);
-
-    res.json({
-        files,
-        pagination: {
-            page,
-            limit,
-            total,
-            totalPages: Math.ceil(total / limit)
-        }
-    });
-});
-
-app.get('/api/admin/settings', requireAdmin, (req, res) => {
-    const settings = db.prepare('SELECT key, value FROM settings').all();
-    const serializedSettings = serializeAdminSettings(settings);
-    res.json(mergeSmtpIntoSettings(serializedSettings, getSmtpEnvironmentConfig()));
-});
-
-app.get('/api/admin/settings/audit', requireAdmin, (req, res) => {
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
-    const offset = (page - 1) * limit;
-
-    const { total } = db.prepare('SELECT COUNT(*) as total FROM settings_audit_log').get();
-    const entries = db.prepare(`
-        SELECT
-            l.id,
-            l.adminUserId,
-            u.username AS adminUsername,
-            l.settingKey,
-            l.oldValue,
-            l.newValue,
-            l.changedAt
-        FROM settings_audit_log l
-        LEFT JOIN users u ON u.id = l.adminUserId
-        ORDER BY l.changedAt DESC
-        LIMIT ? OFFSET ?
-    `).all(limit, offset);
-
-    res.json({
-        entries,
-        pagination: {
-            page,
-            limit,
-            total,
-            totalPages: Math.ceil(total / limit)
-        }
-    });
-});
-
-// Admin: Reset rate limit counters
-app.post('/api/admin/rate-limits/reset', requireAdmin, (req, res) => {
-    const { prefix } = req.body || {};
-    if (prefix && !/^[a-z0-9_-]+$/i.test(prefix)) {
-        return res.status(400).json({ error: 'Prefijo inválido' });
-    }
-    const normalizedPrefix = prefix === 'all' ? null : prefix || null;
-    const deleted = resetRateLimits(normalizedPrefix);
-    res.json({ message: 'Rate limits reiniciados', deleted, prefix: normalizedPrefix || 'all' });
-});
-
-app.post('/api/admin/settings', requireAdmin, (req, res) => {
-    const settings = req.body;
-    const validationError = validateAdminSettingsPayload(settings);
-    if (validationError) {
-        return res.status(400).json({ error: validationError });
-    }
-
-    try {
-        const changedKeys = applyAdminSettings({
-            db,
-            settings,
-            adminUserId: req.session.userId || 'unknown',
-            safeCompare,
-            encrypt,
-            decrypt,
-            isEncrypted,
-        });
-
-        // Invalidate cache so new values take effect immediately
-        if (changedKeys.length > 0) {
-            invalidateSettingsCache(changedKeys);
-        }
-        res.json({
-            message: changedKeys.length > 0 ? 'Configuracion actualizada' : 'Sin cambios',
-            changedKeys
-        });
-    } catch (err) {
-        logger.error('Error al actualizar configuración', { error: err.message });
-        res.status(500).json({ error: 'Error al actualizar configuración' });
-    }
-});
-
-// Branding Upload (logos and favicon)
-const BRANDING_TYPES = new Set(['logoLight', 'logoDark', 'favicon', 'dropzoneIcon']);
-const BRANDING_MIME_EXT = {
-    'image/png': '.png',
-    'image/jpeg': '.jpg',
-    'image/svg+xml': '.svg',
-    'image/x-icon': '.ico',
-    'image/vnd.microsoft.icon': '.ico'
-};
-
-const validateBrandingType = (req, res, next) => {
-    const type = req.query.type;
-    if (!BRANDING_TYPES.has(type)) {
-        return res.status(400).json({ error: 'Tipo inválido. Debe ser logoLight, logoDark, favicon o dropzoneIcon' });
-    }
-    req.brandingType = type;
-    next();
-};
-
-const brandingUpload = multer({
-    storage: multer.diskStorage({
-        destination: (req, file, cb) => cb(null, BRANDING_DIR),
-        filename: (req, file, cb) => {
-            const ext = BRANDING_MIME_EXT[file.mimetype];
-            if (!ext) {
-                return cb(new Error('Tipo de archivo inválido. Solo se permiten PNG, JPG, SVG e ICO.'));
-            }
-            cb(null, `${req.brandingType}${ext}`);
-        }
-    }),
-    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
-    fileFilter: (req, file, cb) => {
-        if (BRANDING_MIME_EXT[file.mimetype]) {
-            cb(null, true);
-        } else {
-            cb(new Error('Tipo de archivo inválido. Solo se permiten PNG, JPG, SVG e ICO.'));
-        }
-    }
-});
-
-app.post('/api/admin/branding/upload', requireAdmin, validateBrandingType, brandingUpload.single('file'), handleMulterError, asyncHandler(async (req, res) => {
-    const type = req.brandingType;
-
-    if (!req.file) {
-        return res.status(400).json({ error: 'No se subió ningún archivo' });
-    }
-
-    const timestamp = Date.now();
-
-    // If it's an SVG logo, queue a background job to create PNG version for emails
-    if (req.file.mimetype === 'image/svg+xml' && (type === 'logoLight' || type === 'logoDark')) {
-        const svgPath = path.join(BRANDING_DIR, req.file.filename);
-        const pngFilename = `${type}-email.png`;
-        const pngPath = path.join(BRANDING_DIR, pngFilename);
-
-        // Queue the conversion job (non-blocking)
-        enqueueBrandingConversion(svgPath, pngPath, {
-            format: 'png',
-            height: 80, // Height for emails, maintains aspect ratio
-        });
-
-        // Pre-register the PNG URL (will be available after job completes)
-        const pngRelativePath = `/branding/${pngFilename}?t=${timestamp}`;
-        const pngUrl = PUBLIC_ORIGIN ? `${PUBLIC_ORIGIN}${pngRelativePath}` : pngRelativePath;
-        const emailLogoKey = type === 'logoLight' ? 'logoLightEmail' : 'logoDarkEmail';
-        db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(emailLogoKey, pngUrl);
-
-        logger.info(`Queued PNG conversion for emails: ${pngFilename}`);
-    }
-
-    // Build the URL - always use relative path for branding assets
-    // They will be served through the same origin
-    const relativePath = `/branding/${req.file.filename}?t=${timestamp}`;
-
-    const stmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
-    stmt.run(type, relativePath);
-
-    res.json({ message: 'Archivo subido', url: relativePath });
-}));
-
-app.delete('/api/admin/branding/:type', requireAdmin, asyncHandler(async (req, res) => {
-    const { type } = req.params;
-    if (!['logoLight', 'logoDark', 'favicon', 'dropzoneIcon'].includes(type)) {
-        return res.status(400).json({ error: 'Tipo inválido' });
-    }
-
-    // Find and delete the file(s) - including email PNG version
-    const files = await fsPromises.readdir(BRANDING_DIR);
-    const filesToDelete = files.filter(f => f.startsWith(type));
-    for (const file of filesToDelete) {
-        await fsPromises.unlink(path.join(BRANDING_DIR, file));
-    }
-
-    // Remove from settings (including email version)
-    db.prepare('DELETE FROM settings WHERE key = ?').run(type);
-    if (type === 'logoLight' || type === 'logoDark') {
-        const emailKey = type === 'logoLight' ? 'logoLightEmail' : 'logoDarkEmail';
-        db.prepare('DELETE FROM settings WHERE key = ?').run(emailKey);
-    }
-
-    res.json({ message: 'Recurso de marca eliminado' });
-}));
 
 // NOTE: cleanup-chunks endpoint is defined later in the file with cleanupOrphanedChunks function
 
-// SMTP Test Endpoint
-app.post('/api/admin/smtp/test', requireAdmin, async (req, res) => {
-    const { email } = req.body;
-    if (!email) {
-        return res.status(400).json({ error: 'Se requiere una dirección de email' });
-    }
-
-    try {
-        if (!isEmailDeliveryEnabled()) {
-            return res.status(400).json({ error: 'Configuración SMTP incompleta. Guarda la configuración primero.' });
-        }
-
-        const transporter = createSmtpTransporter();
-        await transporter.verify();
-
-        const result = await sendEmail(
-            email,
-            'Sendu - Email de Prueba',
-            'Este es un email de prueba desde Sendu. Si recibes este mensaje, la configuración SMTP está funcionando correctamente.',
-            '<h1>Sendu - Email de Prueba</h1><p>Si recibes este mensaje, la configuración SMTP está funcionando correctamente.</p>'
-        );
-
-        if (result.mock) {
-            return res.json({ message: 'Email enviado (modo simulación)', mock: true });
-        }
-
-        res.json({ message: 'Email de prueba enviado correctamente', messageId: result.messageId });
-    } catch (err) {
-        logger.error('SMTP Test Error', { error: err.message });
-        res.status(500).json({ error: `Error SMTP: ${err.message}` });
-    }
+registerPublicSettingsRoutes({
+    app,
+    asyncHandler,
+    getSettingsRepository,
+    getDefaultBrandingSettings,
+    isEmailDeliveryEnabled,
+    getMaxChunkSizeFromSettingsSync,
+    generateFingerprint,
+    getIpFingerprint,
+    canGuestUpload,
 });
 
-// Public Settings (for Navbar/Branding)
-app.get('/api/settings/public', (req, res) => {
-    const keys = ['logoLight', 'logoDark', 'favicon', 'dropzoneIcon', 'footerText'];
-    const stmt = db.prepare(`SELECT * FROM settings WHERE key IN (${keys.map(() => '?').join(',')})`);
-    const settings = stmt.all(...keys);
-
-    const defaultBranding = getDefaultBrandingSettings();
-
-    const settingsMap = {
-        logoLight: defaultBranding.logoLight,
-        logoDark: defaultBranding.logoDark,
-        favicon: defaultBranding.favicon,
-        dropzoneIcon: defaultBranding.dropzoneIcon,
-        footerText: '',
-        emailDeliveryEnabled: isEmailDeliveryEnabled(),
-        requiresEmailVerification: isEmailDeliveryEnabled(),
-        passwordResetEnabled: isEmailDeliveryEnabled()
-    };
-
-    settings.forEach(s => settingsMap[s.key] = s.value);
-    res.json(settingsMap);
-});
-
-// Upload Limits (public)
-app.get('/api/settings/limits', (req, res) => {
-    const keys = [
-        'maxFileSize', 'maxTotalSize', 'guestUploadLimit', 'guestMaxFileSize',
-        'chunkSize', 'maxConcurrentUploads',
-        // Adaptive chunk sizing settings
-        'adaptiveChunkSizing', 'smallFileThreshold', 'mediumFileThreshold',
-        'smallFileChunkSize', 'mediumFileChunkSize', 'largeFileChunkSize',
-        // Rate limiting for chunks
-        'chunkRateLimit'
-    ];
-    const stmt = db.prepare(`SELECT * FROM settings WHERE key IN (${keys.map(() => '?').join(',')})`);
-    const settings = stmt.all(...keys);
-
-    const settingsMap = {
-        maxFileSize: 100,           // Default 100MB for registered users
-        maxTotalSize: 500,          // Default 500MB total storage for registered users
-        guestUploadLimit: 5120,     // Default 5GB (5120MB) total for guests
-        guestMaxFileSize: 50,       // Default 50MB max file size for guests
-        chunkSize: 20,              // Default 20MB per chunk (fallback if adaptive disabled)
-        maxConcurrentUploads: 6,    // Default 6 parallel uploads (balanced for most connections)
-        // Adaptive chunk sizing defaults - reduced for better reliability
-        adaptiveChunkSizing: true,  // Enable adaptive chunk sizing by default
-        smallFileThreshold: 100,    // Files < 100MB are "small"
-        mediumFileThreshold: 1024,  // Files < 1GB are "medium", >= 1GB are "large"
-        smallFileChunkSize: 16,     // 16MB chunks for small files (fast feedback, menos overhead)
-        mediumFileChunkSize: 48,    // 48MB chunks para medianos (balance velocidad/fiabilidad)
-        largeFileChunkSize: 96,     // 96MB chunks para grandes (mejor throughput en conexiones buenas)
-        chunkRateLimit: 1000        // Default 1000 chunk requests per minute
-    };
-
-    settings.forEach(s => {
-        if (s.key === 'adaptiveChunkSizing') {
-            settingsMap[s.key] = s.value === 'true' || s.value === true;
-        } else {
-            settingsMap[s.key] = parseInt(s.value) || settingsMap[s.key];
-        }
-    });
-
-    // Calculate effective max file size based on user type
-    const isLoggedIn = !!req.session.userId;
-    settingsMap.effectiveMaxFileSize = isLoggedIn ? settingsMap.maxFileSize : settingsMap.guestMaxFileSize;
-    settingsMap.isLoggedIn = isLoggedIn;
-    // Tamaño máximo de chunk permitido por backend (en MB, basado en ajustes + colchón)
-    const maxChunkSizeBytes = getMaxChunkSizeFromSettingsSync();
-    settingsMap.maxChunkSize = Math.round(maxChunkSizeBytes / (1024 * 1024));
-
-    // Add guest remaining if not logged in
-    if (!isLoggedIn) {
-        const fingerprint = generateFingerprint(req);
-        const ipFingerprint = getIpFingerprint(req);
-        const guestLimitBytes = settingsMap.guestUploadLimit * 1024 * 1024;
-
-        const check1 = canGuestUpload(fingerprint, 0, guestLimitBytes);
-        const check2 = canGuestUpload(ipFingerprint, 0, guestLimitBytes);
-
-        settingsMap.guestRemaining = Math.min(check1.remaining, check2.remaining);
-    }
-
-    res.json(settingsMap);
-});
-
-// Health check endpoint (for Docker/PaaS health probes)
-app.get('/api/health', (req, res) => {
-    res.json({
-        status: 'ok',
-        timestamp: Date.now(),
-        uptime: process.uptime()
-    });
-});
-
-// Session debug endpoint (only in development or with DEBUG_SESSION env, admin-only)
-app.get('/api/health/session', requireAdmin, (req, res) => {
-    if (process.env.NODE_ENV === 'production' && !process.env.DEBUG_SESSION) {
-        return res.status(404).json({ error: 'Not found' });
-    }
-
-    const cookieName = process.env.SESSION_COOKIE_NAME || 'sendu.sid';
-    const sessionCookie = req.cookies?.[cookieName];
-    const trustProxyValue = app.get('trust proxy');
-
-    res.json({
-        config: {
-            cookieName,
-            secure: sessionCookieSecure,
-            sameSite: sessionCookieSameSite,
-            domain: sessionCookieDomain || '(not set)',
-            trustProxy: trustProxyValue,
-            trustProxyType: typeof trustProxyValue,
-            nodeEnv: process.env.NODE_ENV
-        },
-        request: {
-            hasSessionCookie: !!sessionCookie,
-            cookieValue: sessionCookie ? sessionCookie.substring(0, 20) + '...' : null,
-            sessionId: (req.session?.id || req.sessionID)?.substring(0, 16) + '...',
-            hasUserId: !!req.session?.userId,
-            protocol: req.protocol,
-            secure: req.secure,
-            xForwardedProto: req.get('x-forwarded-proto'),
-            host: req.get('host'),
-            origin: req.get('origin')
-        },
-        cookies: Object.keys(req.cookies || {}),
-        fix: req.protocol !== 'https' && req.get('x-forwarded-proto') === 'https'
-            ? 'Trust proxy is not working correctly. Try setting TRUST_PROXY=true'
-            : null
-    });
-});
-
-// Readiness check (DB + storage)
-app.get('/api/health/ready', async (req, res) => {
-    let dbOk = false;
-    let storageOk = false;
-    let dataOk = false;
-
-    try {
-        db.prepare('SELECT 1').get();
-        dbOk = true;
-    } catch { }
-
-    try {
-        await fsPromises.access(UPLOAD_DIR, fs.constants.W_OK);
-        storageOk = true;
-    } catch { }
-
-    try {
-        await fsPromises.access(dataDir, fs.constants.W_OK);
-        dataOk = true;
-    } catch { }
-
-    const ready = dbOk && storageOk && dataOk;
-    res.status(ready ? 200 : 503).json({
-        status: ready ? 'ok' : 'degraded',
-        db: dbOk,
-        uploads: storageOk,
-        data: dataOk,
-        timestamp: Date.now()
-    });
+registerHealthRoutes({
+    app,
+    requireAdmin,
+    getDatabaseHealthRepository,
+    fs,
+    fsPromises,
+    UPLOAD_DIR,
+    dataDir,
+    sessionCookieSecure,
+    sessionCookieSameSite,
+    sessionCookieDomain,
 });
 
 // SPA Fallback - Serve index.html for non-API routes in production
@@ -2919,44 +1325,11 @@ if (process.env.NODE_ENV === 'production') {
     });
 }
 
-// Database Initialization (Schema)
-const initDb = () => {
-    // Run versioned migrations (idempotent)
-    runMigrations(db);
-
-    // Initialize default settings if not present
-    const concurrencySetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('maxConcurrentUploads');
-    if (!concurrencySetting) {
-        db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('maxConcurrentUploads', '6');
-    }
-
-    const bootstrapSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('adminBootstrapCompleted');
-    if (!bootstrapSetting) {
-        db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('adminBootstrapCompleted', 'false');
-    }
-
-    logger.info('Database initialized');
-
-    // Save database after initialization
-    saveDatabase();
-};
-
 // Automatic cleanup job - runs every hour with distributed locking
 const cleanupExpiredFiles = async () => {
     const now = Date.now();
 
-    // Find expired files
-    const expiredFiles = db.prepare('SELECT * FROM files WHERE expiresAt IS NOT NULL AND expiresAt < ?').all(now);
-
-    // Find files with max downloads reached
-    const maxDownloadFiles = db.prepare('SELECT * FROM files WHERE maxDownloads IS NOT NULL AND downloadCount >= maxDownloads').all();
-
-    const filesToDelete = [...expiredFiles, ...maxDownloadFiles];
-
-    // Remove duplicates
-    const uniqueFiles = filesToDelete.filter((file, index, self) =>
-        index === self.findIndex((t) => t.id === file.id)
-    );
+    const uniqueFiles = await getFilesRepository().listCleanupCandidates(now);
 
     if (uniqueFiles.length === 0) return;
 
@@ -2971,7 +1344,7 @@ const cleanupExpiredFiles = async () => {
                     logger.warn('Cleanup: File not found on disk', { fileId: file.id });
                 }
             }
-            db.prepare('DELETE FROM files WHERE id = ?').run(file.id);
+            await getFilesRepository().deleteById(file.id);
             logger.info(`Cleanup: Deleted file ${file.id} (${file.originalName})`);
         } catch (err) {
             logger.error('Cleanup error', { fileId: file.id, error: err.message });
@@ -2980,13 +1353,10 @@ const cleanupExpiredFiles = async () => {
 };
 
 // Cleanup old upload sessions to prevent table growth
-const cleanupUploadSessions = () => {
+const cleanupUploadSessions = async () => {
     const cutoff = Date.now() - (7 * 24 * 60 * 60 * 1000); // 7 days
     try {
-        db.prepare(`
-            DELETE FROM upload_sessions
-            WHERE status IN ('completed','cancelled','failed') AND updatedAt < ?
-        `).run(cutoff);
+        await getUploadSessionsRepository().deleteFinishedBefore(cutoff);
     } catch (err) {
         logger.warn('Cleanup upload sessions failed', { error: err.message });
     }
@@ -2995,7 +1365,7 @@ const cleanupUploadSessions = () => {
 // Reconcile orphaned files between DB and disk
 const reconcileOrphanedFiles = async () => {
     try {
-        const dbFiles = db.prepare('SELECT id, serverPath FROM files').all();
+        const dbFiles = await getFilesRepository().listStorageEntries();
         const dbPathSet = new Set(dbFiles.map(f => f.serverPath));
 
         const entries = await fsPromises.readdir(UPLOAD_DIR, { withFileTypes: true });
@@ -3014,7 +1384,7 @@ const reconcileOrphanedFiles = async () => {
 
         for (const file of dbFiles) {
             if (!fs.existsSync(file.serverPath)) {
-                db.prepare('DELETE FROM files WHERE id = ?').run(file.id);
+                await getFilesRepository().deleteById(file.id);
                 logger.warn('Reconcile: removed DB entry for missing file', { fileId: file.id });
             }
         }
@@ -3086,151 +1456,31 @@ const cleanupOrphanedChunks = async (maxAgeMs = 24 * 60 * 60 * 1000) => {
     return { deletedCount, freedBytes };
 };
 
-// Admin endpoint to manually trigger orphaned chunks cleanup
-app.post('/api/admin/cleanup-chunks', requireAdmin, asyncHandler(async (req, res) => {
-    const { maxAgeHours = 1, useQueue = false } = req.body; // Default: 1 hour old chunks
-
-    if (useQueue) {
-        // Queue the cleanup job for background processing
-        const jobId = enqueueCleanup('chunks', {
-            maxAgeHours,
-            chunksDir: CHUNKS_DIR
-        });
-        return res.json({
-            message: 'Limpieza encolada para procesamiento en segundo plano',
-            jobId
-        });
-    }
-
-    // Immediate cleanup (legacy behavior)
-    const maxAgeMs = Math.max(1, Math.min(720, maxAgeHours)) * 60 * 60 * 1000; // 1 hour to 30 days
-
-    const result = await cleanupOrphanedChunks(maxAgeMs);
-
-    const freedMB = (result.freedBytes / (1024 * 1024)).toFixed(2);
-    logger.info(`Manual cleanup: Deleted ${result.deletedCount} orphaned chunk folders, freed ${freedMB}MB`);
-
-    res.json({
-        message: `Se eliminaron ${result.deletedCount} carpetas de chunks huérfanos`,
-        deletedCount: result.deletedCount,
-        freedBytes: result.freedBytes,
-        freedMB: parseFloat(freedMB)
-    });
-}));
-
-// Admin endpoint to view job queue status
-app.get('/api/admin/jobs/stats', requireAdmin, asyncHandler(async (req, res) => {
-    const stats = getQueueStats();
-    res.json(stats);
-}));
-
-// Admin endpoint to list pending jobs (optionally filtered by type)
-app.get('/api/admin/jobs/pending', requireAdmin, asyncHandler(async (req, res) => {
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
-    const type = typeof req.query.type === 'string' ? req.query.type : null;
-
-    if (type && type !== 'all' && !Object.values(JOB_TYPES).includes(type)) {
-        return res.status(400).json({ error: 'Tipo de job invalido' });
-    }
-
-    if (type && type !== 'all') {
-        return res.json({ jobs: getPendingJobs(type, limit) });
-    }
-
-    const combined = Object.values(JOB_TYPES)
-        .flatMap((jobType) => getPendingJobs(jobType, limit))
-        .sort((a, b) => {
-            if (a.priority !== b.priority) {
-                return b.priority - a.priority;
-            }
-            return a.scheduled_at - b.scheduled_at;
-        })
-        .slice(0, limit);
-
-    return res.json({ jobs: combined });
-}));
-
-// Admin endpoint to retry dead jobs
-app.post('/api/admin/jobs/retry-dead', requireAdmin, asyncHandler(async (req, res) => {
-    const { type } = req.body || {};
-
-    if (type && !Object.values(JOB_TYPES).includes(type)) {
-        return res.status(400).json({ error: 'Tipo de job invalido' });
-    }
-
-    const retried = retryDeadJobs(type || null);
-    res.json({
-        message: `Se reintentaron ${retried} job(s) muertos`,
-        retried,
-        type: type || 'all'
-    });
-}));
-
-// Admin endpoint to cancel a pending job
-app.post('/api/admin/jobs/:id/cancel', requireAdmin, asyncHandler(async (req, res) => {
-    const cancelled = cancelJob(req.params.id);
-    if (!cancelled) {
-        return res.status(404).json({ error: 'Job no encontrado o no esta pendiente' });
-    }
-    res.json({ message: 'Job cancelado', id: req.params.id });
-}));
-
-// Admin endpoint for basic operational metrics
-app.get('/api/admin/metrics', requireAdmin, asyncHandler(async (req, res) => {
-    const report = await buildOperationalMetrics({
-        db,
-        uploadDir: UPLOAD_DIR,
-        dataDir,
-        checkDiskSpace,
-        fsModule: fs,
-        fsPromisesModule: fsPromises,
-        getQueueStats,
-        metrics,
-    });
-    res.json(report);
-}));
-
-app.get('/metrics', asyncHandler(async (req, res) => {
-    if (!canAccessExportedMetrics(req)) {
-        return res.status(401).type('text/plain').send('unauthorized\n');
-    }
-
-    const report = await buildOperationalMetrics({
-        db,
-        uploadDir: UPLOAD_DIR,
-        dataDir,
-        checkDiskSpace,
-        fsModule: fs,
-        fsPromisesModule: fsPromises,
-        getQueueStats,
-        metrics,
-    });
-
-    res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
-    res.set('Cache-Control', 'no-store');
-    res.send(serializeOperationalMetricsPrometheus(report));
-}));
-
-// Admin endpoint to schedule cleanup jobs
-app.post('/api/admin/jobs/cleanup', requireAdmin, asyncHandler(async (req, res) => {
-    const { type = 'all' } = req.body;
-    const jobs = [];
-
-    if (type === 'files' || type === 'all') {
-        const jobId = enqueueCleanup('files', { uploadDir: UPLOAD_DIR });
-        jobs.push({ type: 'files', jobId });
-    }
-
-    if (type === 'chunks' || type === 'all') {
-        const jobId = enqueueCleanup('chunks', { chunksDir: CHUNKS_DIR });
-        jobs.push({ type: 'chunks', jobId });
-    }
-
-    res.json({
-        message: `${jobs.length} trabajo(s) de limpieza encolado(s)`,
-        jobs
-    });
-}));
+registerAdminOperationsRoutes({
+    app,
+    requireAdmin,
+    asyncHandler,
+    enqueueCleanup,
+    CHUNKS_DIR,
+    UPLOAD_DIR,
+    cleanupOrphanedChunks,
+    logger,
+    getQueueStats,
+    getPendingJobs,
+    JOB_TYPES,
+    retryDeadJobs,
+    cancelJob,
+    buildOperationalMetrics,
+    getDatabaseHealthRepository,
+    getUploadSessionsRepository,
+    dataDir,
+    checkDiskSpace,
+    fs,
+    fsPromises,
+    metrics,
+    serializeOperationalMetricsPrometheus,
+    canAccessExportedMetrics,
+});
 
 // 404 handler for unmatched routes
 app.use(notFoundHandler);
@@ -3243,7 +1493,7 @@ const runCleanup = async () => {
     if (!db) return; // Skip if database not initialized yet
     const ran = await runWithLock(async () => {
         await cleanupExpiredFiles();
-        cleanupUploadSessions();
+        await cleanupUploadSessions();
         await reconcileOrphanedFiles();
     });
     if (ran) {
@@ -3325,12 +1575,26 @@ const startServer = async (options = {}) => {
 
         // Initialize database first
         db = await initDatabase(targetDbPath);
+        settingsRepository = null;
+        usersRepository = null;
+        uploadSessionsRepository = null;
+        filesRepository = null;
+        databaseHealthRepository = null;
+        resetRuntimeSettingsCache();
 
-        // Initialize database schema
-        initDb();
-
-        // Seed default branding settings if missing
-        ensureDefaultBrandingSettings();
+        // Initialize database schema/defaults and brand assets
+        await initializeDatabaseDefaults({
+            db,
+            runMigrations,
+            saveDatabase,
+            logger,
+            getSettingsRepository,
+        });
+        await seedDefaultBrandingSettings({
+            getSettingsRepository,
+            getDefaultBrandingSettings,
+        });
+        await refreshRuntimeSettingsCache({ force: true });
 
         // Initialize persistent stores (CSRF, guest tracking, download tokens, sessions)
         initPersistentStores(db);
@@ -3352,10 +1616,11 @@ const startServer = async (options = {}) => {
             logger.info('Job queue system initialized (emails, cleanup, branding conversion)');
         }
 
-        // Log some stats to verify data persistence
-        const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get()?.count || 0;
-        const settingsCount = db.prepare('SELECT COUNT(*) as count FROM settings').get()?.count || 0;
-        logger.info(`Database loaded: ${userCount} users, ${settingsCount} settings`);
+        await logDatabaseStats({
+            getUsersRepository,
+            getSettingsRepository,
+            logger,
+        });
 
         if (enableSchedulers) {
             // Run cleanup on startup and schedule next

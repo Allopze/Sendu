@@ -6,8 +6,33 @@ name: CI
     branches: [main, master]
 
 jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Gitleaks on repository contents
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/repo" \
+            -w /repo \
+            ghcr.io/gitleaks/gitleaks:latest \
+            dir . --no-git --config .gitleaks.toml --redact --report-format sarif --report-path gitleaks-report.sarif
+
+      - name: Upload Gitleaks SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks-report.sarif
+
   build-test:
     runs-on: ubuntu-latest
+    needs: secret-scan
     steps:
       - name: Checkout
         uses: actions/checkout@v4

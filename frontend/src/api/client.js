@@ -150,10 +150,10 @@ const apiClient = {
             signal
         });
     },
-    completeUpload: (uploadId) => fetchWithCsrf(`${UPLOAD_API_BASE}/upload/complete`, {
+    completeUpload: (uploadId, extra = {}) => fetchWithCsrf(`${UPLOAD_API_BASE}/upload/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uploadId })
+        body: JSON.stringify({ uploadId, ...extra })
     }),
     getUploadStatus: (uploadId, uploadToken) => fetch(`${UPLOAD_API_BASE}/upload/status/${uploadId}`, {
         credentials: 'include',

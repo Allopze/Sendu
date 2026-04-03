@@ -15,8 +15,10 @@
  * - Dead letter queue for failed jobs
  */
 import logger from './logger.js';
+import { createJobQueueRepository } from './jobQueueRepository.js';
 
 let db = null;
+let jobQueueRepository = null;
 let isProcessing = false;
 let processingInterval = null;
 let cleanupInterval = null;
@@ -77,8 +79,8 @@ export function initJobQueue(database, options = {}) {
     if (!isDbOpen()) {
         throw new Error('Job queue requires an open database connection');
     }
-    
-    createJobTables();
+
+    jobQueueRepository = createJobQueueRepository({ db });
     
     // Start processing jobs
     startJobProcessor();
@@ -90,39 +92,6 @@ export function initJobQueue(database, options = {}) {
     cleanupInterval = setInterval(cleanupOldJobs, 60 * 60 * 1000);
     
     logger.info('Job queue system initialized');
-}
-
-/**
- * Create job queue tables
- */
-function createJobTables() {
-    if (!isDbOpen()) {
-        return;
-    }
-
-    db.exec(`
-        CREATE TABLE IF NOT EXISTS job_queue (
-            id TEXT PRIMARY KEY,
-            type TEXT NOT NULL,
-            payload TEXT NOT NULL,
-            status TEXT DEFAULT 'pending',
-            priority INTEGER DEFAULT 0,
-            attempts INTEGER DEFAULT 0,
-            max_retries INTEGER DEFAULT 3,
-            last_error TEXT,
-            scheduled_at INTEGER NOT NULL,
-            started_at INTEGER,
-            completed_at INTEGER,
-            created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),
-            locked_by TEXT,
-            locked_until INTEGER
-        )
-    `);
-    
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_job_status ON job_queue(status)`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_job_scheduled ON job_queue(scheduled_at)`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_job_type ON job_queue(type)`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_job_priority ON job_queue(priority DESC, scheduled_at ASC)`);
 }
 
 /**
@@ -145,21 +114,29 @@ export function registerJobHandler(type, handler) {
  * @param {object} options - Job options
  * @returns {string} The job ID
  */
-export function enqueueJob(type, payload, options = {}) {
+export async function enqueueJob(type, payload, options = {}) {
     const {
         priority = 0,
         delay = 0, // Delay in milliseconds before job becomes available
         maxRetries = config.maxRetries,
     } = options;
+
+    if (!isDbOpen() || !jobQueueRepository) {
+        throw new Error('Job queue is not initialized');
+    }
     
     const id = generateJobId();
     const scheduledAt = Date.now() + delay;
     
     try {
-        db.prepare(`
-            INSERT INTO job_queue (id, type, payload, priority, max_retries, scheduled_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        `).run(id, type, JSON.stringify(payload), priority, maxRetries, scheduledAt);
+        await jobQueueRepository.enqueueJob({
+            id,
+            type,
+            payload: JSON.stringify(payload),
+            priority,
+            maxRetries,
+            scheduledAt,
+        });
         
         logger.debug(`Enqueued job ${id} of type ${type}`, { priority, delay });
         return id;
@@ -177,7 +154,7 @@ export function enqueueJob(type, payload, options = {}) {
  * @param {object} options - Additional options (from, priority, etc.)
  * @returns {string} The job ID
  */
-export function enqueueEmail(to, subject, html, options = {}) {
+export async function enqueueEmail(to, subject, html, options = {}) {
     return enqueueJob(JOB_TYPES.EMAIL, {
         to,
         subject,
@@ -196,7 +173,7 @@ export function enqueueEmail(to, subject, html, options = {}) {
  * @param {object} params - Cleanup parameters
  * @returns {string} The job ID
  */
-export function enqueueCleanup(cleanupType, params = {}) {
+export async function enqueueCleanup(cleanupType, params = {}) {
     const type = cleanupType === 'chunks' ? JOB_TYPES.CLEANUP_CHUNKS : JOB_TYPES.CLEANUP_FILES;
     return enqueueJob(type, params, {
         priority: -10, // Low priority for cleanup tasks
@@ -210,7 +187,7 @@ export function enqueueCleanup(cleanupType, params = {}) {
  * @param {object} options - Conversion options (format, size, etc.)
  * @returns {string} The job ID
  */
-export function enqueueBrandingConversion(imagePath, outputPath, options = {}) {
+export async function enqueueBrandingConversion(imagePath, outputPath, options = {}) {
     return enqueueJob(JOB_TYPES.BRANDING_CONVERT, {
         imagePath,
         outputPath,
@@ -228,7 +205,7 @@ export function enqueueBrandingConversion(imagePath, outputPath, options = {}) {
  * @param {string} workerId - Unique identifier for this worker
  * @returns {object|null} The job or null if none available
  */
-function acquireNextJob(workerId) {
+async function acquireNextJob(workerId) {
     if (!isDbOpen()) {
         return null;
     }
@@ -237,40 +214,11 @@ function acquireNextJob(workerId) {
     const lockDuration = config.jobTimeoutMs;
     
     try {
-        // Find and lock the next available job in one transaction
-        const job = db.prepare(`
-            SELECT * FROM job_queue 
-            WHERE status = 'pending' 
-            AND scheduled_at <= ?
-            AND (locked_until IS NULL OR locked_until < ?)
-            ORDER BY priority DESC, scheduled_at ASC
-            LIMIT 1
-        `).get(now, now);
-        
-        if (!job) return null;
-        
-        // Try to lock it
-        const result = db.prepare(`
-            UPDATE job_queue 
-            SET status = 'processing', 
-                locked_by = ?, 
-                locked_until = ?,
-                started_at = ?,
-                attempts = attempts + 1
-            WHERE id = ? 
-            AND status = 'pending'
-            AND (locked_until IS NULL OR locked_until < ?)
-        `).run(workerId, now + lockDuration, now, job.id, now);
-        
-        if (result.changes === 0) {
-            // Another worker got it first
-            return null;
-        }
-        
-        return {
-            ...job,
-            payload: JSON.parse(job.payload),
-        };
+        return await jobQueueRepository.acquireNextAvailableJob({
+            workerId,
+            now,
+            lockUntil: now + lockDuration,
+        });
     } catch (err) {
         if (isDbClosedError(err)) {
             stopJobProcessor();
@@ -285,16 +233,9 @@ function acquireNextJob(workerId) {
  * Mark a job as completed
  * @param {string} jobId - The job ID
  */
-function completeJob(jobId) {
+async function completeJob(jobId) {
     try {
-        db.prepare(`
-            UPDATE job_queue 
-            SET status = 'completed', 
-                completed_at = ?,
-                locked_by = NULL,
-                locked_until = NULL
-            WHERE id = ?
-        `).run(Date.now(), jobId);
+        await jobQueueRepository.completeJob(jobId, Date.now());
     } catch (err) {
         logger.error('Error completing job', { jobId, error: err.message });
     }
@@ -307,21 +248,13 @@ function completeJob(jobId) {
  * @param {number} attempts - Current attempt count
  * @param {number} maxRetries - Max allowed retries
  */
-function failJob(jobId, error, attempts, maxRetries) {
+async function failJob(jobId, error, attempts, maxRetries) {
     const now = Date.now();
     
     try {
         if (attempts >= maxRetries) {
             // Move to dead letter queue
-            db.prepare(`
-                UPDATE job_queue 
-                SET status = 'dead', 
-                    last_error = ?,
-                    completed_at = ?,
-                    locked_by = NULL,
-                    locked_until = NULL
-                WHERE id = ?
-            `).run(error, now, jobId);
+            await jobQueueRepository.markDeadJob(jobId, error, now);
             
             logger.warn(`Job ${jobId} moved to dead letter queue after ${attempts} attempts`, { error });
         } else {
@@ -329,15 +262,7 @@ function failJob(jobId, error, attempts, maxRetries) {
             const retryDelay = config.retryDelayMs * Math.pow(2, attempts - 1);
             const nextRun = now + retryDelay;
             
-            db.prepare(`
-                UPDATE job_queue 
-                SET status = 'pending', 
-                    last_error = ?,
-                    scheduled_at = ?,
-                    locked_by = NULL,
-                    locked_until = NULL
-                WHERE id = ?
-            `).run(error, nextRun, jobId);
+            await jobQueueRepository.rescheduleJob(jobId, error, nextRun);
             
             logger.debug(`Job ${jobId} scheduled for retry at ${new Date(nextRun).toISOString()}`, { 
                 attempt: attempts, 
@@ -361,7 +286,7 @@ async function processNextJob() {
     if (isProcessing) return;
     
     const workerId = `worker-${process.pid}-${Date.now()}`;
-    const job = acquireNextJob(workerId);
+    const job = await acquireNextJob(workerId);
     
     if (!job) return;
     
@@ -384,12 +309,12 @@ async function processNextJob() {
             ),
         ]);
         
-        completeJob(job.id);
+        await completeJob(job.id);
         logger.debug(`Job ${job.id} completed successfully`);
         
     } catch (err) {
         logger.error(`Job ${job.id} failed`, { type: job.type, error: err.message });
-        failJob(job.id, err.message, job.attempts, job.max_retries);
+        await failJob(job.id, err.message, job.attempts, job.max_retries);
     } finally {
         isProcessing = false;
     }
@@ -402,18 +327,11 @@ function startJobProcessor() {
     if (processingInterval || !isDbOpen()) return;
     
     // Reset any stale processing jobs (from crashed workers)
-    try {
-        db.prepare(`
-            UPDATE job_queue 
-            SET status = 'pending', locked_by = NULL, locked_until = NULL 
-            WHERE status = 'processing' AND locked_until < ?
-        `).run(Date.now());
-    } catch (err) {
+    jobQueueRepository.resetStaleProcessingJobs(Date.now()).catch((err) => {
         if (!isDbClosedError(err)) {
             logger.error('Failed to reset stale processing jobs', { error: err.message });
         }
-        return;
-    }
+    });
     
     // Process jobs at regular intervals
     processingInterval = setInterval(processNextJob, config.processingIntervalMs);
@@ -452,54 +370,28 @@ function cleanupOldJobs() {
 
     const cutoff = Date.now() - (config.cleanupAfterDays * 24 * 60 * 60 * 1000);
     
-    try {
-        const result = db.prepare(`
-            DELETE FROM job_queue 
-            WHERE (status = 'completed' OR status = 'dead') 
-            AND completed_at < ?
-        `).run(cutoff);
-        
-        if (result.changes > 0) {
-            logger.debug(`Cleaned up ${result.changes} old jobs`);
-        }
-    } catch (err) {
-        logger.error('Error cleaning up old jobs', { error: err.message });
-    }
+    jobQueueRepository.cleanupFinishedBefore(cutoff)
+        .then((changes) => {
+            if (changes > 0) {
+                logger.debug(`Cleaned up ${changes} old jobs`);
+            }
+        })
+        .catch((err) => {
+            logger.error('Error cleaning up old jobs', { error: err.message });
+        });
 }
 
 /**
  * Get job queue statistics
  * @returns {object} Queue statistics
  */
-export function getQueueStats() {
+export async function getQueueStats() {
     if (!isDbOpen()) {
         return { byStatus: {}, byType: {}, total: 0 };
     }
 
     try {
-        const stats = db.prepare(`
-            SELECT 
-                status,
-                COUNT(*) as count,
-                AVG(attempts) as avg_attempts
-            FROM job_queue
-            GROUP BY status
-        `).all();
-        
-        const byType = db.prepare(`
-            SELECT 
-                type,
-                COUNT(*) as count
-            FROM job_queue
-            WHERE status = 'pending'
-            GROUP BY type
-        `).all();
-        
-        return {
-            byStatus: stats.reduce((acc, s) => ({ ...acc, [s.status]: s.count }), {}),
-            byType: byType.reduce((acc, t) => ({ ...acc, [t.type]: t.count }), {}),
-            total: stats.reduce((sum, s) => sum + s.count, 0),
-        };
+        return await jobQueueRepository.getQueueStats();
     } catch (err) {
         logger.error('Error getting queue stats', { error: err.message });
         return { byStatus: {}, byType: {}, total: 0 };
@@ -512,22 +404,13 @@ export function getQueueStats() {
  * @param {number} limit - Max jobs to return
  * @returns {Array} List of jobs
  */
-export function getPendingJobs(type, limit = 10) {
+export async function getPendingJobs(type, limit = 10) {
     if (!isDbOpen()) {
         return [];
     }
 
     try {
-        return db.prepare(`
-            SELECT id, type, payload, priority, attempts, scheduled_at, created_at
-            FROM job_queue
-            WHERE type = ? AND status = 'pending'
-            ORDER BY priority DESC, scheduled_at ASC
-            LIMIT ?
-        `).all(type, limit).map(job => ({
-            ...job,
-            payload: JSON.parse(job.payload),
-        }));
+        return await jobQueueRepository.listPendingJobs(type, limit);
     } catch (err) {
         logger.error('Error getting pending jobs', { error: err.message });
         return [];
@@ -539,21 +422,15 @@ export function getPendingJobs(type, limit = 10) {
  * @param {string} type - The job type (optional, retries all if not specified)
  * @returns {number} Number of jobs retried
  */
-export function retryDeadJobs(type = null) {
+export async function retryDeadJobs(type = null) {
     if (!isDbOpen()) {
         return 0;
     }
 
     try {
-        const query = type
-            ? `UPDATE job_queue SET status = 'pending', attempts = 0, scheduled_at = ? WHERE status = 'dead' AND type = ?`
-            : `UPDATE job_queue SET status = 'pending', attempts = 0, scheduled_at = ? WHERE status = 'dead'`;
-        
-        const params = type ? [Date.now(), type] : [Date.now()];
-        const result = db.prepare(query).run(...params);
-        
-        logger.info(`Retried ${result.changes} dead jobs`, { type });
-        return result.changes;
+        const changes = await jobQueueRepository.retryDeadJobs(type, Date.now());
+        logger.info(`Retried ${changes} dead jobs`, { type });
+        return changes;
     } catch (err) {
         logger.error('Error retrying dead jobs', { error: err.message });
         return 0;
@@ -565,17 +442,14 @@ export function retryDeadJobs(type = null) {
  * @param {string} jobId - The job ID
  * @returns {boolean} Whether the job was cancelled
  */
-export function cancelJob(jobId) {
+export async function cancelJob(jobId) {
     if (!isDbOpen()) {
         return false;
     }
 
     try {
-        const result = db.prepare(`
-            DELETE FROM job_queue WHERE id = ? AND status = 'pending'
-        `).run(jobId);
-        
-        return result.changes > 0;
+        const changes = await jobQueueRepository.cancelPendingJob(jobId);
+        return changes > 0;
     } catch (err) {
         logger.error('Error cancelling job', { jobId, error: err.message });
         return false;

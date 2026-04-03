@@ -9,7 +9,7 @@ services:
     container_name: sendu-app
     restart: unless-stopped
     ports:
-      - "${PORT:-4000}:${PORT:-4000}"
+      - "${HOST_PORT:-4000}:${PORT:-4000}"
     environment:
       - NODE_ENV=production
       - PORT=${PORT:-4000}

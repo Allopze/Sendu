@@ -21,6 +21,7 @@ cp .env.example .env
 - Genera también un `ENCRYPTION_KEY` distinto si vas a guardar settings sensibles en la base de datos.
 - Usa un único `PUBLIC_ORIGIN` válido, sin slash final.
 - Ajusta `ALLOWED_ORIGINS` como lista separada por comas solo si realmente necesitas más de un origen.
+- Si la máquina ya usa `3000`, define `HOST_PORT=3301` o cualquier puerto libre para publicar el contenedor sin tocar el puerto interno de la app.
 
 Si necesitas correo transaccional desde el arranque, define también `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` y `SMTP_FROM`. Luego podrás sobrescribirlos desde el panel Admin si hace falta.
 
@@ -44,6 +45,19 @@ docker compose down
 ```
 
 El archivo docker-compose.yml crea volúmenes persistentes para data, uploads, logs y branding.
+
+## Single host vs HA
+
+`docker-compose.yml` sigue siendo la ruta recomendada para single-host. Si necesitas alta disponibilidad real o `4+` instancias, no escales este compose sobre SQLite como si fuera una topología HA.
+
+Para ese escenario, usa la arquitectura objetivo documentada en [docs/SCALING.md](docs/SCALING.md):
+
+- estado relacional en PostgreSQL,
+- sesiones y rate limiting en Redis,
+- binarios en object storage o shared filesystem controlado,
+- balanceador externo con health checks contra `/api/health/ready`.
+
+Cuando prepares esa topología, declara además los backends en `.env` con `DEPLOYMENT_PROFILE`, `STATE_BACKEND`, `SESSION_BACKEND`, `RATE_LIMIT_BACKEND`, `QUEUE_BACKEND` y `UPLOAD_STORAGE_BACKEND` para que las métricas operativas reflejen si el despliegue está realmente listo.
 
 ## Docker (prebuilt / release)
 

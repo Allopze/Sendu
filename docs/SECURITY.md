@@ -29,3 +29,18 @@
 
 - CSP configurable con CSP_STRICT.
 - En producción se recomienda activar CSP_STRICT y ajustar orígenes si usas recursos externos.
+
+## Secret scanning preventivo
+
+- CI ejecuta Gitleaks sobre el árbol actual del repositorio antes de tests y build.
+- La configuración vive en `.gitleaks.toml` y excluye artefactos generados, datos mutables y releases empaquetados para evitar ruido.
+- Para reproducir el escaneo localmente sin instalar binarios en el host:
+
+```bash
+docker run --rm \
+	--user "$(id -u):$(id -g)" \
+	-v "$PWD:/repo" \
+	-w /repo \
+	ghcr.io/gitleaks/gitleaks:latest \
+	dir . --no-git --config .gitleaks.toml --redact
+```

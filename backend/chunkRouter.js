@@ -27,12 +27,13 @@ import { validateUploadSessionToken } from './lib/uploadSessionToken.js';
 
 /**
  * Crear el router de chunks optimizado
- * @param {object} options - { CHUNKS_DIR, TEMP_DIR, getMaxChunkSize, isProduction }
+ * @param {object} options - { CHUNKS_DIR, TEMP_DIR, getMaxChunkSize, getUploadSessionsRepository, isProduction }
  */
 export const createChunkRouter = (options) => {
-    const { CHUNKS_DIR, TEMP_DIR, getMaxChunkSize, getUploadLimits, isProduction, db: getDb, maxUploadAgeMs = 24 * 60 * 60 * 1000 } = options;
+    const { CHUNKS_DIR, TEMP_DIR, getMaxChunkSize, getUploadLimits, getUploadSessionsRepository, isProduction, maxUploadAgeMs = 24 * 60 * 60 * 1000 } = options;
     
     const router = express.Router();
+    const uploadSessionsRepository = () => getUploadSessionsRepository();
     
     // Multer configurado para chunks
     const storage = multer.diskStorage({
@@ -186,68 +187,57 @@ export const createChunkRouter = (options) => {
             const delta = (req.file.size || 0) - (req.existingChunkSize || 0);
             const projectedBytes = authoritativeBytesBefore + delta;
 
-            // Validate upload session state (DB-backed)
-            const db = typeof getDb === 'function' ? getDb() : null;
-            if (db) {
-                const session = db.prepare('SELECT status, createdAt, userId, ipFingerprint, bytesReceived FROM upload_sessions WHERE uploadId = ?').get(uploadId);
-                if (!session) {
-                    try { await fsPromises.unlink(req.file.path); } catch {}
-                    metrics.increment('upload_chunk_client_error', 1);
-                    return res.status(404).json({ error: 'Sesión de subida no encontrada' });
-                }
-                const uploadToken = req.get('x-upload-token') || req.query.uploadToken;
-                if (!validateUploadSessionToken({
-                    uploadId,
-                    token: uploadToken,
-                    userId: session.userId || null,
-                    ipFingerprint: session.ipFingerprint || null,
-                })) {
-                    try { await fsPromises.unlink(req.file.path); } catch {}
-                    metrics.increment('upload_chunk_client_error', 1);
-                    return res.status(403).json({ error: 'No autorizado para esta sesión de subida' });
-                }
-                if (session.status === 'cancelled' || session.status === 'completed') {
-                    try { await fsPromises.unlink(req.file.path); } catch {}
-                    metrics.increment('upload_chunk_client_error', 1);
-                    return res.status(409).json({ error: 'Sesión de subida no disponible' });
-                }
-                if (Date.now() - session.createdAt > maxUploadAgeMs) {
-                    try { await fsPromises.unlink(req.file.path); } catch {}
-                    metrics.increment('upload_chunk_client_error', 1);
-                    return res.status(410).json({ error: 'Sesión de subida expirada' });
-                }
+            // Validate upload session state (repository-backed)
+            const session = await uploadSessionsRepository().findByUploadId(uploadId);
+            if (!session) {
+                try { await fsPromises.unlink(req.file.path); } catch {}
+                metrics.increment('upload_chunk_client_error', 1);
+                return res.status(404).json({ error: 'Sesión de subida no encontrada' });
+            }
+            const uploadToken = req.get('x-upload-token') || req.query.uploadToken;
+            if (!validateUploadSessionToken({
+                uploadId,
+                token: uploadToken,
+                userId: session.userId || null,
+                ipFingerprint: session.ipFingerprint || null,
+            })) {
+                try { await fsPromises.unlink(req.file.path); } catch {}
+                metrics.increment('upload_chunk_client_error', 1);
+                return res.status(403).json({ error: 'No autorizado para esta sesión de subida' });
+            }
+            if (session.status === 'cancelled' || session.status === 'completed') {
+                try { await fsPromises.unlink(req.file.path); } catch {}
+                metrics.increment('upload_chunk_client_error', 1);
+                return res.status(409).json({ error: 'Sesión de subida no disponible' });
+            }
+            if (Date.now() - session.createdAt > maxUploadAgeMs) {
+                try { await fsPromises.unlink(req.file.path); } catch {}
+                metrics.increment('upload_chunk_client_error', 1);
+                return res.status(410).json({ error: 'Sesión de subida expirada' });
+            }
 
-                // Enforce in-progress quota per user/IP
-                if (typeof getUploadLimits === 'function') {
-                    const limits = getUploadLimits();
-                    const guestLimitBytes = limits.guestUploadLimit * 1024 * 1024;
-                    const userLimitBytes = limits.maxTotalSize * 1024 * 1024;
-                    const currentSessionBytes = Number(session.bytesReceived) || 0;
+            // Enforce in-progress quota per user/IP
+            if (typeof getUploadLimits === 'function') {
+                const limits = getUploadLimits();
+                const guestLimitBytes = limits.guestUploadLimit * 1024 * 1024;
+                const userLimitBytes = limits.maxTotalSize * 1024 * 1024;
+                const currentSessionBytes = Number(session.bytesReceived) || 0;
 
-                    if (meta.userId) {
-                        const row = db.prepare(`
-                            SELECT COALESCE(SUM(bytesReceived), 0) as total
-                            FROM upload_sessions
-                            WHERE userId = ? AND status IN ('initiated','processing')
-                        `).get(meta.userId);
-                        const projectedUserTotal = Math.max(0, (row?.total || 0) - currentSessionBytes + projectedBytes);
-                        if (projectedUserTotal > userLimitBytes) {
-                            try { await fsPromises.unlink(req.file.path); } catch {}
-                            metrics.increment('upload_chunk_client_error', 1);
-                            return res.status(429).json({ error: 'Límite de subida en progreso excedido' });
-                        }
-                    } else if (meta.ipFingerprint) {
-                        const row = db.prepare(`
-                            SELECT COALESCE(SUM(bytesReceived), 0) as total
-                            FROM upload_sessions
-                            WHERE ipFingerprint = ? AND status IN ('initiated','processing')
-                        `).get(meta.ipFingerprint);
-                        const projectedGuestTotal = Math.max(0, (row?.total || 0) - currentSessionBytes + projectedBytes);
-                        if (projectedGuestTotal > guestLimitBytes) {
-                            try { await fsPromises.unlink(req.file.path); } catch {}
-                            metrics.increment('upload_chunk_client_error', 1);
-                            return res.status(429).json({ error: 'Límite de subida en progreso excedido' });
-                        }
+                if (session.userId) {
+                    const total = await uploadSessionsRepository().sumActiveBytesByUser(session.userId);
+                    const projectedUserTotal = Math.max(0, total - currentSessionBytes + projectedBytes);
+                    if (projectedUserTotal > userLimitBytes) {
+                        try { await fsPromises.unlink(req.file.path); } catch {}
+                        metrics.increment('upload_chunk_client_error', 1);
+                        return res.status(429).json({ error: 'Límite de subida en progreso excedido' });
+                    }
+                } else if (session.ipFingerprint) {
+                    const total = await uploadSessionsRepository().sumActiveBytesByIp(session.ipFingerprint);
+                    const projectedGuestTotal = Math.max(0, total - currentSessionBytes + projectedBytes);
+                    if (projectedGuestTotal > guestLimitBytes) {
+                        try { await fsPromises.unlink(req.file.path); } catch {}
+                        metrics.increment('upload_chunk_client_error', 1);
+                        return res.status(429).json({ error: 'Límite de subida en progreso excedido' });
                     }
                 }
             }
@@ -280,11 +270,8 @@ export const createChunkRouter = (options) => {
                 throw renameError;
             }
 
-            if (db) {
-                const authoritativeBytes = await getDirectorySize(uploadPath);
-                db.prepare('UPDATE upload_sessions SET bytesReceived = ?, updatedAt = ? WHERE uploadId = ?')
-                    .run(authoritativeBytes, Date.now(), uploadId);
-            }
+            const authoritativeBytes = await getDirectorySize(uploadPath);
+            await uploadSessionsRepository().updateBytesReceived(uploadId, authoritativeBytes, Date.now());
             
             const duration = Date.now() - startTime;
             

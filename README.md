@@ -13,6 +13,7 @@ Plataforma de intercambio de archivos con subidas en chunks, enlaces protegidos,
 - docs/SECURITY.md
 - docs/TROUBLESHOOTING.md
 - docs/ARCHITECTURE.md
+- docs/SCALING.md
 
 ## Inicio rápido (desarrollo)
 
@@ -24,6 +25,8 @@ openssl rand -hex 64
 ```
 
 Usa el valor generado para `SESSION_SECRET` y, preferiblemente, otro distinto para `ENCRYPTION_KEY`. `PUBLIC_ORIGIN` debe ser una sola URL pública válida.
+
+Si ejecutas con Docker y el host ya usa el puerto `3000`, define `HOST_PORT` en `.env` para publicar el contenedor en otro puerto, por ejemplo `HOST_PORT=3301`.
 
 2) Instala dependencias:
 

@@ -1,5 +1,7 @@
 const SETTINGS_AUDIT_REDACTED = '[REDACTED]';
 
+import { createSettingsRepository } from './settingsRepository.js';
+
 export const SENSITIVE_SETTINGS_KEYS = new Set(['smtpPass']);
 
 export const ALLOWED_SETTINGS_KEYS = new Set([
@@ -220,27 +222,27 @@ export const validateAdminSettingsPayload = (settings) => {
 };
 
 export const applyAdminSettings = ({
-    db,
+    settingsRepository,
     settings,
     adminUserId,
     safeCompare,
     encrypt,
     decrypt,
     isEncrypted,
+    getEncryptionFormat,
 }) => {
-    const getCurrentStmt = db.prepare('SELECT value FROM settings WHERE key = ?');
-    const upsertStmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
-    const auditStmt = db.prepare(`
-        INSERT INTO settings_audit_log (adminUserId, settingKey, oldValue, newValue, changedAt)
-        VALUES (?, ?, ?, ?, ?)
-    `);
+    const applySettings = async () => {
+        const settingKeys = Object.keys(settings || {});
+        if (settingKeys.length === 0) {
+            return [];
+        }
 
-    const applySettings = db.transaction((incomingSettings, currentAdminUserId) => {
-        const now = Date.now();
-        const changedKeys = [];
+        const existingRows = await settingsRepository.listByKeys(settingKeys);
+        const existingSettings = new Map(existingRows.map((row) => [row.key, row.value]));
+        const changes = [];
 
-        for (const [key, rawValue] of Object.entries(incomingSettings)) {
-            const existingValue = getCurrentStmt.get(key)?.value ?? null;
+        for (const [key, rawValue] of Object.entries(settings)) {
+            const existingValue = existingSettings.get(key) ?? null;
             let finalValue = null;
 
             if (SENSITIVE_SETTINGS_KEYS.has(key)) {
@@ -250,15 +252,27 @@ export const applyAdminSettings = ({
                     continue;
                 }
 
-                const existingSecret = existingValue
-                    ? (isEncrypted(existingValue) ? decrypt(existingValue) : existingValue)
-                    : '';
+                const existingFormat = getEncryptionFormat?.(existingValue) || null;
+                let existingSecret = '';
+                if (existingValue) {
+                    if (isEncrypted(existingValue)) {
+                        try {
+                            existingSecret = decrypt(existingValue);
+                        } catch {
+                            existingSecret = '';
+                        }
+                    } else {
+                        existingSecret = existingValue;
+                    }
+                }
 
-                if (existingSecret && safeCompare(existingSecret, submittedSecret)) {
+                if (existingSecret && safeCompare(existingSecret, submittedSecret) && existingFormat === 'aes-256-gcm') {
                     continue;
                 }
 
-                finalValue = isEncrypted(submittedSecret) ? submittedSecret : encrypt(submittedSecret);
+                finalValue = isEncrypted(submittedSecret) && getEncryptionFormat?.(submittedSecret) === 'aes-256-gcm'
+                    ? submittedSecret
+                    : encrypt(submittedSecret);
             } else {
                 finalValue = stringifySettingValue(key, rawValue);
                 if (existingValue === finalValue) {
@@ -266,19 +280,95 @@ export const applyAdminSettings = ({
                 }
             }
 
-            upsertStmt.run(key, finalValue);
-            auditStmt.run(
-                currentAdminUserId,
+            changes.push({
                 key,
-                sanitizeSettingAuditValue(key, existingValue),
-                sanitizeSettingAuditValue(key, finalValue),
-                now
-            );
-            changedKeys.push(key);
+                value: finalValue,
+                oldValue: sanitizeSettingAuditValue(key, existingValue),
+                newValue: sanitizeSettingAuditValue(key, finalValue),
+            });
         }
 
-        return changedKeys;
-    });
+        if (changes.length === 0) {
+            return [];
+        }
 
-    return applySettings(settings, adminUserId);
+        return settingsRepository.applyChangesWithAudit({
+            changes,
+            adminUserId,
+        });
+    };
+
+    return applySettings();
+};
+
+export const migrateSensitiveSettingsToCurrentEncryption = ({
+    settingsRepository,
+    db,
+    encrypt,
+    decrypt,
+    getEncryptionFormat,
+    logger,
+}) => {
+    const sensitiveKeys = Array.from(SENSITIVE_SETTINGS_KEYS);
+    if ((!settingsRepository && !db) || sensitiveKeys.length === 0) {
+        return [];
+    }
+
+    const buildMigratedEntries = (rows) => {
+        if (!Array.isArray(rows) || rows.length === 0) {
+            return [];
+        }
+
+        const migratedEntries = [];
+
+        for (const row of rows) {
+            if (!row?.value) {
+                continue;
+            }
+
+            const currentFormat = getEncryptionFormat?.(row.value) || null;
+            if (currentFormat === 'aes-256-gcm') {
+                continue;
+            }
+
+            const plainValue = currentFormat === 'aes-256-cbc-legacy'
+                ? decrypt(row.value)
+                : row.value;
+
+            const nextValue = encrypt(plainValue);
+            if (nextValue === row.value) {
+                continue;
+            }
+
+            migratedEntries.push({ key: row.key, value: nextValue });
+        }
+
+        return migratedEntries;
+    };
+
+    const logMigratedKeys = (migratedEntries) => {
+        if (migratedEntries.length > 0) {
+            logger?.info?.('Sensitive settings migrated to latest encryption', {
+                migratedKeys: migratedEntries.map((entry) => entry.key),
+                count: migratedEntries.length
+            });
+        }
+
+        return migratedEntries.map((entry) => entry.key);
+    };
+
+    if (db) {
+        const repository = createSettingsRepository({ db });
+        const migratedEntries = buildMigratedEntries(repository.listByKeysSync(sensitiveKeys));
+        repository.upsertManySync(migratedEntries);
+        return logMigratedKeys(migratedEntries);
+    }
+
+    const migrateSettings = async () => {
+        const migratedEntries = buildMigratedEntries(await settingsRepository.listByKeys(sensitiveKeys));
+        await settingsRepository.upsertMany(migratedEntries);
+        return logMigratedKeys(migratedEntries);
+    };
+
+    return migrateSettings();
 };

@@ -1,0 +1,17 @@
+title = "Sendu gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Ignore generated artifacts and mutable runtime data"
+paths = [
+  '''(?:^|/)coverage(?:/.*)?$''',
+  '''(?:^|/)test-results(?:/.*)?$''',
+  '''(?:^|/)tmp(?:/.*)?$''',
+  '''(?:^|/)uploads(?:/.*)?$''',
+  '''(?:^|/)data(?:/.*)?$''',
+  '''(?:^|/)backend/logs(?:/.*)?$''',
+  '''(?:^|/)release(?:/.*)?$''',
+  '''(?:^|/)frontend/dist(?:/.*)?$''',
+]

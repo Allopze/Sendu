@@ -521,15 +521,16 @@ console.log('✅ Build validation passed!');
 // Step 14: Create release folder and ZIP
 console.log('\n📦 Creating release package...');
 
-// Clean and create release folder
-if (fs.existsSync(releaseDir)) {
-    fs.rmSync(releaseDir, { recursive: true, force: true });
-}
+// Keep the release directory intact so local/root-owned artifacts do not break fresh builds.
 fs.mkdirSync(releaseDir, { recursive: true });
 
 // Create ZIP file using PowerShell (Windows) or zip command (Unix)
 const zipPath = path.join(releaseDir, zipFileName);
 const isWindows = process.platform === 'win32';
+
+if (fs.existsSync(zipPath)) {
+    fs.rmSync(zipPath, { force: true });
+}
 
 try {
     if (isWindows) {

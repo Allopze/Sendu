@@ -3,6 +3,90 @@
 Fecha: 2026-04-01
 Proyecto: Sendu
 
+# Actualización de implementación
+
+Fecha: 2026-04-02
+
+Esta sección refleja el estado vigente del repositorio después de contrastar el informe original con el código actual y aplicar fixes adicionales. La auditoría original se conserva debajo como referencia histórica, pero el estado actual debe leerse desde aquí.
+
+## Estado vigente
+- Estado: mejor que en la auditoría original, pero todavía no la sacaría como “producción madura”
+- Nota global estimada: 7/10
+- Nivel de confianza: Alto
+
+## Bloqueadores originales ya resueltos
+- `Secretos reales expuestos y plantilla inválida`: resuelto. `.env.example` ya usa placeholders y `PUBLIC_ORIGIN` válido.
+- `SMTP inconsistente entre deploy y backend`: resuelto. El backend ahora toma base desde `SMTP_*` y permite override desde Admin/settings.
+- `bytesReceived` contaminado por chunks inválidos`: resuelto. La actualización ocurre después del `rename` final y con recálculo autoritativo desde disco.
+- `test:coverage` roto`: resuelto. `@vitest/coverage-v8` está instalada y la cobertura ejecuta correctamente.
+- `CI sin coverage/smoke`: resuelto. El workflow ya incluye cobertura y Playwright smoke.
+- `Huecos de accesibilidad mencionados en el informe`: resuelto para los casos citados. El modal de confirmación ya usa `role="dialog"` y `aria-modal`, y las acciones icon-only del dashboard ya tienen `aria-label`.
+
+## Fixes aplicados en esta ronda
+- Corregidos `docker-compose.yml` y `docker-compose.prebuilt.yml`, que estaban inválidos por bloques YAML duplicados.
+- Reparada la reproducibilidad del smoke E2E:
+  - `playwright.config.js` ahora inyecta `SESSION_SECRET` para producción en el `webServer`.
+  - El entorno E2E deja explícitamente vacías las variables `SMTP_*` para no heredar verificación de email desde `.env` local.
+  - Se alineó `reuseExistingServer` con el patrón recomendado por Playwright y se dejó `stderr` visible para depuración.
+- Endurecido `scripts/build.js` para no borrar por completo `release/`, evitando fallos por artefactos previos con permisos distintos.
+- Reducido logging sensible de email:
+  - ya no se registran destinatarios ni asuntos completos;
+  - ahora solo se registran conteo de destinatarios, dominios y longitud del asunto.
+- Reducido el pico de memoria del ZIP en frontend:
+  - se reemplazó `jszip` por `@zip.js/zip.js`;
+  - el worker ya no convierte cada archivo a `ArrayBuffer`;
+  - la compresión ahora consume `ReadableStream` de cada `File` y genera un `Blob` final desde un `TransformStream`, evitando duplicar en memoria tanto las entradas como el ZIP final en formato `ArrayBuffer`.
+- Modularizado parcialmente `backend/server.js`:
+  - auth extraído a `backend/routes/auth.js`;
+  - settings públicos extraídos a `backend/routes/publicSettings.js`;
+  - operaciones/admin metrics/jobs extraídos a `backend/routes/adminOperations.js`;
+  - `server.js` sigue grande, pero ya no concentra estas rutas inline.
+- Endurecido el cifrado de settings sensibles:
+  - `backend/lib/encryption.js` ahora cifra nuevos secretos con AES-256-GCM;
+  - `decrypt()` dejó de hacer fail-open para payloads cifrados corruptos;
+  - se mantiene compatibilidad de lectura con el formato legado AES-CBC para no romper secretos ya guardados.
+- Migración one-shot de secretos sensibles legado:
+  - `backend/lib/migrations.js` ahora ejecuta la migración `006_sensitive_settings_gcm`;
+  - los secretos sensibles heredados en AES-CBC o plaintext quedan reescritos a AES-256-GCM de forma idempotente.
+- Streaming ZIP -> upload end-to-end para archivos/carpetas grandes:
+  - el worker ya puede emitir chunks del ZIP en streaming con backpressure;
+  - el frontend sube esos chunks a `/api/upload/chunk` sin materializar el archivo ZIP completo como `Blob` final;
+  - `/api/upload/complete` ahora acepta `finalChunkIndex` y `actualSize` para cerrar subidas ZIP en streaming con tamaño final real.
+- Secret scanning preventivo en CI:
+  - `.github/workflows/ci.yml` ahora ejecuta Gitleaks antes de tests/build;
+  - el scan corre sobre el árbol actual (`dir --no-git`) para bloquear nuevas credenciales sin reabrir todo el histórico git;
+  - el resultado se publica además como SARIF.
+- Resume post-refresh para ZIP streaming:
+  - el frontend persiste las entradas fuente del ZIP en almacenamiento local;
+  - tras un refresh, reconstruye el stream, consulta el progreso remoto y reanuda desde los bytes ya recibidos.
+- Modularización adicional de backend:
+  - upload/init/status/complete/cancel extraído a `backend/routes/upload.js`;
+  - settings admin/branding/SMTP test/rate-limit reset extraído a `backend/routes/adminSettings.js`;
+  - download/meta/share extraído a `backend/routes/download.js`;
+  - listados y borrado de archivos extraído a `backend/routes/files.js`;
+  - stats y administración de usuarios extraído a `backend/routes/adminUsers.js`;
+  - health/readiness extraído a `backend/routes/health.js`;
+  - bootstrap de base de datos/defaults movido a `backend/lib/bootstrap.js`.
+- Estrategia de escalado real codificada en repo:
+  - nueva guía `docs/SCALING.md` para `4+` instancias / HA;
+  - nuevas variables declarativas de topología (`DEPLOYMENT_PROFILE`, `STATE_BACKEND`, `SESSION_BACKEND`, `RATE_LIMIT_BACKEND`, `QUEUE_BACKEND`, `UPLOAD_STORAGE_BACKEND`);
+  - `/api/admin/metrics` y `/metrics` ahora exponen si una topología marcada como `ha` está realmente lista o sigue apoyándose en SQLite/filesystem local.
+
+## Validación actualizada
+- `docker compose -f docker-compose.yml config`: pasando.
+- `docker compose -f docker-compose.prebuilt.yml config`: pasando.
+- `npm run build`: pasando.
+- `npm run lint`: pasando, con warning no bloqueante de `baseline-browser-mapping` desactualizado.
+- `npm run test`: `14` archivos de test, `95/95` tests pasando.
+- `npx vitest run backend/tests/operationalMetrics.test.js`: pasando (`1/1`).
+- `npm run test:coverage`: pasando.
+- `npm run test:e2e:smoke`: `4/4` escenarios pasando.
+- `npm audit --omit=dev`: `0` vulnerabilidades en root.
+- `npm audit --omit=dev --prefix frontend`: `0` vulnerabilidades en frontend.
+
+## Pendiente real a día de hoy
+- Conectar `/metrics` o `/api/admin/metrics` a monitorización/alertado externo real; hoy sigue documentado, pero no integrado en el repo.
+
 # Veredicto final
 - Estado: Está parcialmente lista, pero no debería salir a producción todavía
 - Nota global: 6/10

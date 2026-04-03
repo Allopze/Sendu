@@ -14,6 +14,7 @@ Checklist mínimo antes de abrir tráfico:
 - `summary.storage.freePercent` está por encima de `15%`.
 - `queue.byStatus.dead` está en `0`.
 - `summary.http.serverErrorRate` está por debajo de `1%`.
+- Si `DEPLOYMENT_PROFILE=ha`, `topology.profileReady` debe ser `true`.
 
 ## Backup
 
@@ -58,9 +59,15 @@ También puedes ejecutar limpieza desde Admin:
 
 - `alerts`: alertas derivadas para disk, dead jobs, 5xx, stale uploads y degradación de resume.
 - `summary`: tráfico, storage, uploads, downloads y resumable.
+- `topology`: perfil declarado (`single` o `ha`), backends configurados y si la topología marcada está lista para su perfil.
 - `slo`: objetivos y valor actual para completion rate de uploads, success rate de downloads, availability de resumable y server error rate HTTP.
 
 `/metrics` expone el mismo estado resumido en formato Prometheus para scrapers externos. El acceso requiere sesión admin o `Authorization: Bearer <METRICS_EXPORT_TOKEN>`.
+
+Métricas nuevas de topología:
+
+- `sendu_topology_profile_ready{profile="..."}`
+- `sendu_topology_backend_info{profile="...",component="...",backend="..."}`
 
 ## Logs
 
@@ -87,6 +94,7 @@ Si integras monitorización externa, alerta cuando ocurra cualquiera de estas co
 - `summary.uploads.staleSessions > 0`
 - `summary.resumable.chunkServerErrors > 0`
 - `summary.resumable.availabilityRate < 0.9` con al menos `3` probes
+- `sendu_topology_profile_ready{profile="ha"} == 0` durante más de `5m`
 
 ## Runbooks
 
@@ -117,6 +125,13 @@ Si integras monitorización externa, alerta cuando ocurra cualquiera de estas co
 1. Revisar `GET /api/admin/jobs/stats`.
 2. Reintentar jobs muertos con `POST /api/admin/jobs/retry-dead`.
 3. Si reaparecen, inspeccionar logs de workers y credenciales de SMTP/branding/cleanup.
+
+### HA profile not ready
+
+1. Revisar `topology` en `/api/admin/metrics` o `sendu_topology_*` en Prometheus.
+2. Confirmar que el despliegue no sigue declarando SQLite para `state`, `session`, `rateLimit` o `queue` si el perfil es `ha`.
+3. Confirmar que el backend de binarios sea `object-storage` o, como transición, `shared-filesystem` gestionado.
+4. Si todavía estás en single-host, cambia `DEPLOYMENT_PROFILE=single` para no generar una falsa expectativa operacional.
 
 ## Automatización recomendada
 

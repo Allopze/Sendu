@@ -1,6 +1,7 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { initDatabase, saveDatabase, closeDatabase } from './lib/database.js';
+import { createUsersRepository } from './lib/usersRepository.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,11 +17,10 @@ if (!username) {
 
 const run = async () => {
     const db = await initDatabase(dbPath);
-    
-    const stmt = db.prepare('UPDATE users SET role = ? WHERE username = ?');
-    const info = stmt.run('admin', username);
+    const usersRepository = createUsersRepository({ db });
+    const info = await usersRepository.setRoleByUsername(username, 'admin');
 
-    if (info.changes > 0) {
+    if (info > 0) {
         console.log(`User ${username} is now an admin.`);
     } else {
         console.log(`User ${username} not found.`);

@@ -7,7 +7,19 @@ const OPFS_DIR_NAME = 'sendu-upload-persistence';
 const getCacheKey = (uploadId) => `/__sendu_upload_persistence__/${uploadId}`;
 const getOpfsDataName = (uploadId) => `${uploadId}.bin`;
 const getOpfsMetaName = (uploadId) => `${uploadId}.json`;
+const getOpfsArchiveDirName = (uploadId) => `${uploadId}-archive`;
 const STORAGE_TIMEOUT_MS = 3000;
+
+const buildArchiveEntryFallbackName = (entryPath, index) => {
+    const normalized = String(entryPath || '').split('/').filter(Boolean);
+    return normalized[normalized.length - 1] || `entry-${index}.bin`;
+};
+
+const isArchiveEntriesPayload = (entries) => (
+    Array.isArray(entries)
+    && entries.length > 0
+    && entries.every((entry) => entry && typeof entry.path === 'string' && entry.file instanceof Blob)
+);
 
 const canUseOpfs = () => (
     typeof navigator !== 'undefined'
@@ -85,7 +97,8 @@ const withTimeout = async (promise, timeoutMs = STORAGE_TIMEOUT_MS) => {
     }
 };
 
-const savePersistedUploadToOpfs = async ({ uploadId, file, state }) => {
+const savePersistedUploadToOpfs = async ({ uploadId, file, entries, state }) => {
+    if (isArchiveEntriesPayload(entries)) return false;
     if (!uploadId || !(file instanceof Blob)) return false;
 
     const directory = await getOpfsDirectory();
@@ -113,8 +126,106 @@ const savePersistedUploadToOpfs = async ({ uploadId, file, state }) => {
     }
 };
 
+const savePersistedArchiveToOpfs = async ({ uploadId, entries, state }) => {
+    if (!uploadId || !isArchiveEntriesPayload(entries)) return false;
+
+    const directory = await getOpfsDirectory();
+    if (!directory) return false;
+
+    const archiveDirName = getOpfsArchiveDirName(uploadId);
+
+    try {
+        const archiveDirectory = await directory.getDirectoryHandle(archiveDirName, { create: true });
+        const manifestEntries = [];
+
+        for (const [index, entry] of entries.entries()) {
+            const source = entry.file instanceof Blob ? entry.file : null;
+            if (!source) {
+                return false;
+            }
+
+            const dataName = `entry-${String(index).padStart(6, '0')}.bin`;
+            const fileHandle = await archiveDirectory.getFileHandle(dataName, { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(source);
+            await writable.close();
+
+            manifestEntries.push({
+                path: entry.path,
+                dataName,
+                fileName: entry.file.name || buildArchiveEntryFallbackName(entry.path, index),
+                fileType: entry.file.type || 'application/octet-stream',
+                lastModified: entry.file.lastModified || Date.now()
+            });
+        }
+
+        const manifestHandle = await archiveDirectory.getFileHandle('manifest.json', { create: true });
+        const manifestWritable = await manifestHandle.createWritable();
+        await manifestWritable.write(JSON.stringify({
+            kind: 'archive',
+            entries: manifestEntries,
+            state,
+        }));
+        await manifestWritable.close();
+
+        return true;
+    } catch {
+        try {
+            await directory.removeEntry(archiveDirName, { recursive: true });
+        } catch {
+            // Ignore cleanup failures
+        }
+        return false;
+    }
+};
+
+const getPersistedArchiveFromOpfs = async (uploadId) => {
+    if (!uploadId) return null;
+
+    const directory = await getOpfsDirectory();
+    if (!directory) return null;
+
+    try {
+        const archiveDirectory = await directory.getDirectoryHandle(getOpfsArchiveDirName(uploadId));
+        const manifestHandle = await archiveDirectory.getFileHandle('manifest.json');
+        const manifestText = await (await manifestHandle.getFile()).text();
+        const manifest = JSON.parse(manifestText || '{}');
+
+        if (manifest.kind !== 'archive' || !Array.isArray(manifest.entries)) {
+            return null;
+        }
+
+        const entries = [];
+        for (const [index, entry] of manifest.entries.entries()) {
+            const dataHandle = await archiveDirectory.getFileHandle(entry.dataName || `entry-${String(index).padStart(6, '0')}.bin`);
+            const blob = await dataHandle.getFile();
+            entries.push({
+                path: entry.path || buildArchiveEntryFallbackName(entry.fileName, index),
+                file: new File([blob], entry.fileName || buildArchiveEntryFallbackName(entry.path, index), {
+                    type: entry.fileType || 'application/octet-stream',
+                    lastModified: entry.lastModified || Date.now()
+                })
+            });
+        }
+
+        return {
+            uploadId,
+            kind: 'archive',
+            state: manifest.state || null,
+            entries,
+        };
+    } catch {
+        return null;
+    }
+};
+
 const getPersistedUploadFromOpfs = async (uploadId) => {
     if (!uploadId) return null;
+
+    const archivePersisted = await getPersistedArchiveFromOpfs(uploadId);
+    if (archivePersisted?.entries?.length) {
+        return archivePersisted;
+    }
 
     const directory = await getOpfsDirectory();
     if (!directory) return null;
@@ -130,6 +241,7 @@ const getPersistedUploadFromOpfs = async (uploadId) => {
 
         return {
             uploadId,
+            kind: 'file',
             file: new File([fileBlob], metadata.fileName || 'upload.bin', {
                 type: metadata.fileType || 'application/octet-stream',
                 lastModified: metadata.lastModified || Date.now()
@@ -147,6 +259,12 @@ const deletePersistedUploadFromOpfs = async (uploadId) => {
     if (!directory) return;
 
     try {
+        await directory.removeEntry(getOpfsArchiveDirName(uploadId), { recursive: true });
+    } catch {
+        // Ignore cleanup failures
+    }
+
+    try {
         await directory.removeEntry(getOpfsDataName(uploadId));
     } catch {
         // Ignore cleanup failures
@@ -159,7 +277,8 @@ const deletePersistedUploadFromOpfs = async (uploadId) => {
     }
 };
 
-const savePersistedUploadToCache = async ({ uploadId, file, state }) => {
+const savePersistedUploadToCache = async ({ uploadId, file, entries, state }) => {
+    if (isArchiveEntriesPayload(entries)) return false;
     if (typeof caches === 'undefined' || !uploadId || !file) return false;
 
     try {
@@ -218,18 +337,34 @@ const deletePersistedUploadFromCache = async (uploadId) => {
     }
 };
 
-const savePersistedUploadToIndexedDb = async ({ uploadId, file, state }) => {
-    if (!uploadId || !file) return false;
+const savePersistedUploadToIndexedDb = async ({ uploadId, file, entries, state }) => {
+    if (!uploadId) return false;
 
     try {
+        const archiveEntries = isArchiveEntriesPayload(entries)
+            ? entries.map((entry, index) => ({
+                path: entry.path,
+                fileBlob: entry.file.slice(0, entry.file.size, entry.file.type),
+                fileName: entry.file.name || buildArchiveEntryFallbackName(entry.path, index),
+                fileType: entry.file.type || 'application/octet-stream',
+                lastModified: entry.file.lastModified || Date.now()
+            }))
+            : null;
         const fileBlob = file instanceof Blob ? file.slice(0, file.size, file.type) : null;
+
+        if (!fileBlob && !archiveEntries) {
+            return false;
+        }
+
         const stored = await withStore('readwrite', (store, resolve, reject) => {
             const request = store.put({
                 uploadId,
+                kind: archiveEntries ? 'archive' : 'file',
                 fileBlob,
-                fileName: file.name || state?.fileName || 'upload.bin',
-                fileType: file.type || state?.fileType || '',
-                lastModified: file.lastModified || state?.lastModified || Date.now(),
+                entries: archiveEntries,
+                fileName: file?.name || state?.fileName || 'upload.bin',
+                fileType: file?.type || state?.fileType || '',
+                lastModified: file?.lastModified || state?.lastModified || Date.now(),
                 state,
                 savedAt: Date.now()
             });
@@ -255,6 +390,32 @@ const getPersistedUploadFromIndexedDb = async (uploadId) => {
                     return;
                 }
 
+                if (record.kind === 'archive' || Array.isArray(record.entries)) {
+                    const entries = Array.isArray(record.entries)
+                        ? record.entries.map((entry, index) => ({
+                            path: entry.path || buildArchiveEntryFallbackName(entry.fileName, index),
+                            file: entry.fileBlob
+                                ? new File(
+                                    [entry.fileBlob],
+                                    entry.fileName || buildArchiveEntryFallbackName(entry.path, index),
+                                    {
+                                        type: entry.fileType || 'application/octet-stream',
+                                        lastModified: entry.lastModified || Date.now()
+                                    }
+                                )
+                                : null
+                        })).filter((entry) => entry.file)
+                        : [];
+
+                    resolve({
+                        uploadId: record.uploadId,
+                        kind: 'archive',
+                        state: record.state || null,
+                        entries,
+                    });
+                    return;
+                }
+
                 const file = record.fileBlob
                     ? new File(
                         [record.fileBlob],
@@ -268,6 +429,7 @@ const getPersistedUploadFromIndexedDb = async (uploadId) => {
 
                 resolve({
                     ...record,
+                    kind: 'file',
                     file
                 });
             };
@@ -278,13 +440,17 @@ const getPersistedUploadFromIndexedDb = async (uploadId) => {
     }
 };
 
-export const savePersistedUpload = async ({ uploadId, file, state }) => {
-    if (!uploadId || !file) return false;
+export const savePersistedUpload = async ({ uploadId, file, entries, state }) => {
+    if (!uploadId || (!file && !isArchiveEntriesPayload(entries))) return false;
+
+    const payload = { uploadId, file, entries, state };
 
     const results = await Promise.allSettled([
-        savePersistedUploadToOpfs({ uploadId, file, state }),
-        savePersistedUploadToIndexedDb({ uploadId, file, state }),
-        savePersistedUploadToCache({ uploadId, file, state })
+        isArchiveEntriesPayload(entries)
+            ? savePersistedArchiveToOpfs({ uploadId, entries, state })
+            : savePersistedUploadToOpfs(payload),
+        savePersistedUploadToIndexedDb(payload),
+        savePersistedUploadToCache(payload)
     ]);
 
     return results.some((result) => result.status === 'fulfilled' && result.value === true);

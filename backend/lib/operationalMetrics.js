@@ -24,8 +24,50 @@ const metricLine = (name, value, labels) => {
     return `${name}${formatLabels(labels)} ${value}`;
 };
 
+const normalizeProfile = (value) => {
+    const normalized = String(value || 'single').trim().toLowerCase();
+    return normalized === 'ha' ? 'ha' : 'single';
+};
+
+const normalizeBackend = (value, fallback) => {
+    const normalized = String(value || fallback).trim().toLowerCase();
+    return normalized || fallback;
+};
+
+const buildTopology = (env = process.env) => {
+    const profile = normalizeProfile(env.DEPLOYMENT_PROFILE);
+    const backends = {
+        state: normalizeBackend(env.STATE_BACKEND, 'sqlite'),
+        session: normalizeBackend(env.SESSION_BACKEND, 'sqlite'),
+        rateLimit: normalizeBackend(env.RATE_LIMIT_BACKEND, 'sqlite'),
+        queue: normalizeBackend(env.QUEUE_BACKEND, 'sqlite'),
+        uploads: normalizeBackend(env.UPLOAD_STORAGE_BACKEND, 'filesystem'),
+    };
+
+    const haRequirements = {
+        state: ['postgresql'],
+        session: ['redis'],
+        rateLimit: ['redis'],
+        queue: ['postgresql'],
+        uploads: ['object-storage', 'shared-filesystem'],
+    };
+
+    const missingHaRequirements = Object.entries(haRequirements)
+        .filter(([component, allowedBackends]) => !allowedBackends.includes(backends[component]))
+        .map(([component, allowedBackends]) => ({ component, expected: allowedBackends, actual: backends[component] }));
+
+    return {
+        profile,
+        backends,
+        profileReady: profile === 'ha' ? missingHaRequirements.length === 0 : true,
+        haRequirements,
+        missingHaRequirements,
+    };
+};
+
 export const buildOperationalMetrics = async ({
-    db,
+    databaseHealthRepository = null,
+    uploadSessionsRepository = null,
     uploadDir,
     dataDir,
     checkDiskSpace,
@@ -34,6 +76,7 @@ export const buildOperationalMetrics = async ({
     getQueueStats,
     metrics,
     now = Date.now(),
+    env = process.env,
 }) => {
     let disk = null;
     let uploadsWritable = false;
@@ -45,8 +88,7 @@ export const buildOperationalMetrics = async ({
     } catch {}
 
     try {
-        db.prepare('SELECT 1').get();
-        dbOk = true;
+        dbOk = databaseHealthRepository ? await databaseHealthRepository.ping() : false;
     } catch {}
 
     try {
@@ -59,7 +101,7 @@ export const buildOperationalMetrics = async ({
         dataWritable = true;
     } catch {}
 
-    const queue = getQueueStats();
+    const queue = await getQueueStats();
     const snapshot = metrics.getSnapshot();
     const counters = snapshot.counters || {};
     const totalUploadsStarted = counters.upload_init || 0;
@@ -77,18 +119,11 @@ export const buildOperationalMetrics = async ({
     const downloadSuccessRate = totalDownloadsStarted > 0 ? totalDownloadsCompleted / totalDownloadsStarted : null;
     const resumeAvailabilityRate = totalResumeProbes > 0 ? totalResumeAvailable / totalResumeProbes : null;
     const httpServerErrorRate = totalHttpRequests > 0 ? (counters.http_5xx || 0) / totalHttpRequests : null;
-    const activeUploads = db.prepare(`
-        SELECT COUNT(*) as total
-        FROM upload_sessions
-        WHERE status IN ('initiated', 'processing')
-    `).get()?.total || 0;
-    const staleUploads = db.prepare(`
-        SELECT COUNT(*) as total
-        FROM upload_sessions
-        WHERE status IN ('initiated', 'processing') AND updatedAt < ?
-    `).get(now - (15 * 60 * 1000))?.total || 0;
+    const activeUploads = uploadSessionsRepository ? await uploadSessionsRepository.countActive() : 0;
+    const staleUploads = uploadSessionsRepository ? await uploadSessionsRepository.countStaleActiveBefore(now - (15 * 60 * 1000)) : 0;
     const diskFreePercent = disk?.size ? (disk.free / disk.size) : null;
     const alerts = [];
+    const topology = buildTopology(env);
 
     if (!dbOk || !uploadsWritable || !dataWritable) {
         alerts.push({
@@ -153,11 +188,22 @@ export const buildOperationalMetrics = async ({
             message: `La tasa de finalización de subidas cayó a ${Math.round(uploadCompletionRate * 100)}%.`
         });
     }
+    if (topology.profile === 'ha' && !topology.profileReady) {
+        const missing = topology.missingHaRequirements
+            .map(({ component, expected, actual }) => `${component}=${actual} (esperado: ${expected.join(' | ')})`)
+            .join(', ');
+        alerts.push({
+            code: 'ha_profile_not_ready',
+            severity: 'high',
+            message: `DEPLOYMENT_PROFILE=ha exige backends coordinados externos. Configuración incompleta: ${missing}.`
+        });
+    }
 
     return {
         metrics: snapshot,
         queue,
         disk,
+        topology,
         health: {
             status: dbOk && uploadsWritable && dataWritable ? 'ok' : 'degraded',
             db: dbOk,
@@ -237,6 +283,8 @@ export const serializeOperationalMetricsPrometheus = (report) => {
         '# TYPE sendu_slo_ratio gauge',
         '# TYPE sendu_alert_active gauge',
         '# TYPE sendu_counter_total gauge',
+        '# TYPE sendu_topology_profile_ready gauge',
+        '# TYPE sendu_topology_backend_info gauge',
     ];
 
     const addLine = (name, value, labels) => {
@@ -251,6 +299,11 @@ export const serializeOperationalMetricsPrometheus = (report) => {
     addLine('sendu_health', report.health?.uploads ? 1 : 0, { component: 'uploads' });
     addLine('sendu_health', report.health?.data ? 1 : 0, { component: 'data' });
     addLine('sendu_health', report.health?.status === 'ok' ? 1 : 0, { component: 'overall' });
+    addLine('sendu_topology_profile_ready', report.topology?.profileReady ? 1 : 0, { profile: report.topology?.profile });
+
+    for (const [component, backend] of Object.entries(report.topology?.backends || {})) {
+        addLine('sendu_topology_backend_info', 1, { profile: report.topology?.profile, component, backend });
+    }
 
     addLine('sendu_storage_bytes', report.summary?.storage?.freeBytes, { kind: 'free' });
     addLine('sendu_storage_bytes', report.summary?.storage?.sizeBytes, { kind: 'total' });
