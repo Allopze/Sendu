@@ -583,7 +583,7 @@ const AdminPage = () => {
     };
 
     // Styles
-    const inputClass = `w-full px-4 py-3 rounded-xl outline-none transition-all ${isDark ? 'bg-zinc-800/50 border border-zinc-700 text-white placeholder-zinc-500 focus:border-red-500' : 'bg-zinc-50 border border-zinc-200 text-zinc-900 placeholder-zinc-400 focus:border-red-500'}`;
+    const inputClass = `w-full px-4 py-3 rounded-2xl outline-none transition-all ${isDark ? 'bg-zinc-800/50 border border-zinc-700 text-white placeholder-zinc-500 focus:border-red-500' : 'bg-zinc-50 border border-zinc-200 text-zinc-900 placeholder-zinc-400 focus:border-red-500'}`;
     const labelClass = `block text-xs font-semibold uppercase tracking-wider mb-2 ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`;
 
     if (loading) {
@@ -619,9 +619,9 @@ const AdminPage = () => {
         }
 
         return (
-            <div className={`p-4 rounded-xl border border-dashed flex items-center justify-between group transition-colors ${isDark ? 'border-zinc-700 hover:border-zinc-500 bg-zinc-900/30' : 'border-zinc-300 hover:border-zinc-400 bg-zinc-50'}`}>
+            <div className={`p-4 rounded-2xl border border-dashed flex items-center justify-between group transition-colors ${isDark ? 'border-zinc-700 hover:border-zinc-500 bg-zinc-900/30' : 'border-zinc-300 hover:border-zinc-400 bg-zinc-50'}`}>
                 <div className="flex items-center gap-4">
-                    <div className={`w-12 h-12 rounded-lg flex items-center justify-center overflow-hidden ${bgClass || (isDark ? 'bg-zinc-800' : 'bg-zinc-200')}`}>
+                    <div className={`w-12 h-12 rounded-xl flex items-center justify-center overflow-hidden ${bgClass || (isDark ? 'bg-zinc-800' : 'bg-zinc-200')}`}>
                         {value && !imgError ? (
                             <img
                                 src={value}
@@ -642,7 +642,7 @@ const AdminPage = () => {
                     {value && (
                         <button
                             onClick={() => handleDeleteBranding(type)}
-                            className={`p-2 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity ${isDark ? 'text-red-400 hover:bg-red-500/10' : 'text-red-500 hover:bg-red-50'}`}
+                            className={`p-2 rounded-xl opacity-0 group-hover:opacity-100 transition-opacity ${isDark ? 'text-red-400 hover:bg-red-500/10' : 'text-red-500 hover:bg-red-50'}`}
                         >
                             <Trash2 size={16} />
                         </button>
@@ -650,7 +650,7 @@ const AdminPage = () => {
                     <button
                         onClick={() => handleUploaderClick(type)}
                         disabled={uploading[type]}
-                        className={`px-4 py-2 text-sm font-medium rounded-xl transition-colors ${isDark ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700' : 'bg-white hover:bg-zinc-50 text-zinc-700 border border-zinc-300'} disabled:opacity-50`}
+                        className={`px-4 py-2 text-sm font-medium rounded-2xl transition-colors ${isDark ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700' : 'bg-white hover:bg-zinc-50 text-zinc-700 border border-zinc-300'} disabled:opacity-50`}
                     >
                         {uploading[type] ? <Loader2 size={14} className="animate-spin" /> : 'Subir'}
                     </button>
@@ -672,7 +672,7 @@ const AdminPage = () => {
         const isAdmin = user.role === 'admin';
 
         return (
-            <div className={`flex items-center justify-between p-3 rounded-lg border ${isDark ? 'border-zinc-800 bg-zinc-900/50' : 'border-zinc-200 bg-white'}`}>
+            <div className={`flex items-center justify-between p-3 rounded-xl border ${isDark ? 'border-zinc-800 bg-zinc-900/50' : 'border-zinc-200 bg-white'}`}>
                 <div className="flex items-center gap-3">
                     <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-xs ${isAdmin ? 'bg-red-600' : (isDark ? 'bg-zinc-700' : 'bg-zinc-500')}`}>
                         {user.username.charAt(0).toUpperCase()}
@@ -686,7 +686,7 @@ const AdminPage = () => {
                 </div>
                 <button
                     onClick={() => handleStartEdit(user)}
-                    className={`p-2 rounded-lg ${isDark ? 'text-zinc-400 hover:text-white hover:bg-white/5' : 'text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100'}`}
+                    className={`p-2 rounded-xl ${isDark ? 'text-zinc-400 hover:text-white hover:bg-white/5' : 'text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100'}`}
                 >
                     <Settings size={14} />
                 </button>
@@ -705,7 +705,7 @@ const AdminPage = () => {
                 </h1>
                 <button
                     onClick={handleDiscard}
-                    className={`p-2 rounded-lg transition-colors ${isDark ? 'text-zinc-400 hover:text-white hover:bg-white/5' : 'text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100'}`}
+                    className={`p-2 rounded-xl transition-colors ${isDark ? 'text-zinc-400 hover:text-white hover:bg-white/5' : 'text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100'}`}
                 >
                     <X size={20} />
                 </button>
@@ -729,13 +729,13 @@ const AdminPage = () => {
                         <div className="flex justify-end gap-3 mt-4">
                             <button
                                 onClick={() => { setResetPasswordUser(null); setNewPassword(''); }}
-                                className={`px-4 py-2 rounded-xl ${isDark ? 'text-zinc-400 hover:text-white' : 'text-zinc-600 hover:text-zinc-900'}`}
+                                className={`px-4 py-2 rounded-2xl ${isDark ? 'text-zinc-400 hover:text-white' : 'text-zinc-600 hover:text-zinc-900'}`}
                             >
                                 Cancelar
                             </button>
                             <button
                                 onClick={() => handleResetPassword(resetPasswordUser)}
-                                className="px-4 py-2 bg-red-600 text-white rounded-xl hover:bg-red-700"
+                                className="px-4 py-2 bg-red-600 text-white rounded-2xl hover:bg-red-700"
                             >
                                 Guardar
                             </button>
@@ -756,7 +756,7 @@ const AdminPage = () => {
                                     key={tab.id}
                                     onClick={() => setActiveTab(tab.id)}
                                     className={`
-                                        w-full flex items-center gap-3 px-4 py-3.5 rounded-xl text-[15px] font-medium transition-all text-left
+                                        w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl text-[15px] font-medium transition-all text-left
                                         ${isActive
                                             ? isDark ? 'bg-red-600/10 text-red-500 border border-red-500/20' : 'bg-red-50 text-red-600 border border-red-200'
                                             : isDark
@@ -840,7 +840,7 @@ const AdminPage = () => {
                                 <span className={`text-sm font-semibold ${isDark ? 'text-white' : 'text-zinc-900'}`}>
                                     {users.length} Usuarios Registrados
                                 </span>
-                                <button className={`px-4 py-2 text-sm font-medium rounded-lg border transition-colors ${isDark ? 'border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'border-zinc-300 text-zinc-700 hover:bg-zinc-100'}`}>
+                                <button className={`px-4 py-2 text-sm font-medium rounded-xl border transition-colors ${isDark ? 'border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'border-zinc-300 text-zinc-700 hover:bg-zinc-100'}`}>
                                     Añadir Nuevo
                                 </button>
                             </div>
@@ -860,7 +860,7 @@ const AdminPage = () => {
 
                             {/* Detailed User Edit Panel */}
                             {editingUser && (
-                                <div className={`mt-6 p-5 rounded-xl animate-enter ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
+                                <div className={`mt-6 p-5 rounded-2xl animate-enter ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
                                     <h3 className={`text-lg font-semibold mb-6 ${isDark ? 'text-white' : 'text-zinc-900'}`}>
                                         Editando: {users.find(u => u.id === editingUser)?.username}
                                     </h3>
@@ -885,28 +885,28 @@ const AdminPage = () => {
                                         </div>
                                     </div>
                                     <div className="flex flex-wrap gap-2">
-                                        <button onClick={() => handleSaveEdit(editingUser)} className="px-4 py-2 bg-red-600 text-white rounded-xl hover:bg-red-700 text-sm font-medium flex items-center gap-2">
+                                        <button onClick={() => handleSaveEdit(editingUser)} className="px-4 py-2 bg-red-600 text-white rounded-2xl hover:bg-red-700 text-sm font-medium flex items-center gap-2">
                                             <Check size={14} /> Guardar
                                         </button>
-                                        <button onClick={() => setResetPasswordUser(editingUser)} className={`px-4 py-2 rounded-xl text-sm font-medium flex items-center gap-2 ${isDark ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'}`}>
+                                        <button onClick={() => setResetPasswordUser(editingUser)} className={`px-4 py-2 rounded-2xl text-sm font-medium flex items-center gap-2 ${isDark ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'}`}>
                                             <Key size={14} /> Contraseña
                                         </button>
-                                        <button onClick={() => handleToggleRole(editingUser)} className={`px-4 py-2 rounded-xl text-sm font-medium flex items-center gap-2 ${isDark ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'}`}>
+                                        <button onClick={() => handleToggleRole(editingUser)} className={`px-4 py-2 rounded-2xl text-sm font-medium flex items-center gap-2 ${isDark ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'}`}>
                                             <Shield size={14} /> Admin
                                         </button>
-                                        <button onClick={() => handleToggleVerified(editingUser)} className={`px-4 py-2 rounded-xl text-sm font-medium flex items-center gap-2 ${isDark ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'}`}>
+                                        <button onClick={() => handleToggleVerified(editingUser)} className={`px-4 py-2 rounded-2xl text-sm font-medium flex items-center gap-2 ${isDark ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'}`}>
                                             <CheckCircle size={14} /> Verificado
                                         </button>
-                                        <button onClick={() => handleSendVerificationEmail(editingUser)} className={`px-4 py-2 rounded-xl text-sm font-medium flex items-center gap-2 ${isDark ? 'bg-blue-500/20 text-blue-400' : 'bg-blue-50 text-blue-600'}`}>
+                                        <button onClick={() => handleSendVerificationEmail(editingUser)} className={`px-4 py-2 rounded-2xl text-sm font-medium flex items-center gap-2 ${isDark ? 'bg-blue-500/20 text-blue-400' : 'bg-blue-50 text-blue-600'}`}>
                                             <Mail size={14} /> Verificación
                                         </button>
-                                        <button onClick={() => handleSendPasswordResetEmail(editingUser)} className={`px-4 py-2 rounded-xl text-sm font-medium flex items-center gap-2 ${isDark ? 'bg-amber-500/20 text-amber-400' : 'bg-amber-50 text-amber-600'}`}>
+                                        <button onClick={() => handleSendPasswordResetEmail(editingUser)} className={`px-4 py-2 rounded-2xl text-sm font-medium flex items-center gap-2 ${isDark ? 'bg-amber-500/20 text-amber-400' : 'bg-amber-50 text-amber-600'}`}>
                                             <RefreshCw size={14} /> Reset
                                         </button>
-                                        <button onClick={() => setDeleteUserModal({ isOpen: true, userId: editingUser, username: editForm.username })} className={`px-4 py-2 rounded-xl text-sm font-medium flex items-center gap-2 ${isDark ? 'bg-red-500/20 text-red-400' : 'bg-red-50 text-red-600'}`}>
+                                        <button onClick={() => setDeleteUserModal({ isOpen: true, userId: editingUser, username: editForm.username })} className={`px-4 py-2 rounded-2xl text-sm font-medium flex items-center gap-2 ${isDark ? 'bg-red-500/20 text-red-400' : 'bg-red-50 text-red-600'}`}>
                                             <Trash2 size={14} /> Eliminar
                                         </button>
-                                        <button onClick={() => setEditingUser(null)} className={`ml-auto px-4 py-2 rounded-xl text-sm ${isDark ? 'text-zinc-400 hover:text-white' : 'text-zinc-500 hover:text-zinc-900'}`}>
+                                        <button onClick={() => setEditingUser(null)} className={`ml-auto px-4 py-2 rounded-2xl text-sm ${isDark ? 'text-zinc-400 hover:text-white' : 'text-zinc-500 hover:text-zinc-900'}`}>
                                             Cancelar
                                         </button>
                                     </div>
@@ -932,7 +932,7 @@ const AdminPage = () => {
                                         <button
                                             onClick={handleCleanupChunks}
                                             disabled={cleaningChunks}
-                                            className={`flex items-center gap-2 px-4 py-2.5 text-sm rounded-xl font-medium transition-colors ${isDark ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30' : 'bg-amber-100 text-amber-700 hover:bg-amber-200'} disabled:opacity-50`}
+                                            className={`flex items-center gap-2 px-4 py-2.5 text-sm rounded-2xl font-medium transition-colors ${isDark ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30' : 'bg-amber-100 text-amber-700 hover:bg-amber-200'} disabled:opacity-50`}
                                         >
                                             {cleaningChunks ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
                                             Limpiar Chunks
@@ -960,7 +960,7 @@ const AdminPage = () => {
                                             >
                                                 <td className={`px-6 py-4 max-w-xs ${isDark ? 'text-white' : 'text-zinc-900'}`}>
                                                     <div className="flex items-center gap-3">
-                                                        <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800 text-zinc-400' : 'bg-zinc-100 text-zinc-500'}`}>
+                                                        <div className={`p-2 rounded-xl ${isDark ? 'bg-zinc-800 text-zinc-400' : 'bg-zinc-100 text-zinc-500'}`}>
                                                             <FileText size={16} />
                                                         </div>
                                                         <span className="font-medium truncate" title={file.originalName}>
@@ -972,14 +972,14 @@ const AdminPage = () => {
                                                     {(file.size / 1024 / 1024).toFixed(2)} MB
                                                 </td>
                                                 <td className={`px-6 py-4 ${isDark ? 'text-zinc-400' : 'text-zinc-600'}`}>
-                                                    <span className={`px-2 py-1 rounded-lg text-xs font-medium ${isDark ? 'bg-zinc-800' : 'bg-zinc-100'}`}>
+                                                    <span className={`px-2 py-1 rounded-xl text-xs font-medium ${isDark ? 'bg-zinc-800' : 'bg-zinc-100'}`}>
                                                         {file.downloadCount}
                                                     </span>
                                                 </td>
                                                 <td className="px-6 py-4">
                                                     <button
                                                         onClick={() => setDeleteFileModal({ isOpen: true, fileId: file.id, fileName: file.originalName })}
-                                                        className="p-2 rounded-lg text-red-500 hover:bg-red-500/10 transition-colors"
+                                                        className="p-2 rounded-xl text-red-500 hover:bg-red-500/10 transition-colors"
                                                     >
                                                         <Trash2 size={16} />
                                                     </button>
@@ -1074,21 +1074,21 @@ const AdminPage = () => {
                                 </div>
                                 {settings.adaptiveChunkSizing === 'true' ? (
                                     <div className="grid grid-cols-3 gap-4">
-                                        <div className={`p-4 rounded-xl ${isDark ? 'bg-zinc-800/50' : 'bg-white'}`}>
+                                        <div className={`p-4 rounded-2xl ${isDark ? 'bg-zinc-800/50' : 'bg-white'}`}>
                                             <h4 className={`font-medium mb-3 ${isDark ? 'text-white' : 'text-zinc-900'}`}>Pequeños</h4>
                                             <label className={`text-xs ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>Umbral (MB)</label>
                                             <input type="number" className={`${inputClass} mt-1`} value={settings.smallFileThreshold || ''} onChange={(e) => setSettings({ ...settings, smallFileThreshold: e.target.value })} />
                                             <label className={`text-xs ${isDark ? 'text-zinc-500' : 'text-zinc-400'} mt-3 block`}>Chunk (MB)</label>
                                             <input type="number" className={`${inputClass} mt-1`} value={settings.smallFileChunkSize || ''} onChange={(e) => setSettings({ ...settings, smallFileChunkSize: e.target.value })} />
                                         </div>
-                                        <div className={`p-4 rounded-xl ${isDark ? 'bg-zinc-800/50' : 'bg-white'}`}>
+                                        <div className={`p-4 rounded-2xl ${isDark ? 'bg-zinc-800/50' : 'bg-white'}`}>
                                             <h4 className={`font-medium mb-3 ${isDark ? 'text-white' : 'text-zinc-900'}`}>Medianos</h4>
                                             <label className={`text-xs ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>Umbral (MB)</label>
                                             <input type="number" className={`${inputClass} mt-1`} value={settings.mediumFileThreshold || ''} onChange={(e) => setSettings({ ...settings, mediumFileThreshold: e.target.value })} />
                                             <label className={`text-xs ${isDark ? 'text-zinc-500' : 'text-zinc-400'} mt-3 block`}>Chunk (MB)</label>
                                             <input type="number" className={`${inputClass} mt-1`} value={settings.mediumFileChunkSize || ''} onChange={(e) => setSettings({ ...settings, mediumFileChunkSize: e.target.value })} />
                                         </div>
-                                        <div className={`p-4 rounded-xl ${isDark ? 'bg-zinc-800/50' : 'bg-white'}`}>
+                                        <div className={`p-4 rounded-2xl ${isDark ? 'bg-zinc-800/50' : 'bg-white'}`}>
                                             <h4 className={`font-medium mb-3 ${isDark ? 'text-white' : 'text-zinc-900'}`}>Grandes</h4>
                                             <label className={`text-xs ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>Chunk (MB)</label>
                                             <input type="number" className={`${inputClass} mt-1`} value={settings.largeFileChunkSize || ''} onChange={(e) => setSettings({ ...settings, largeFileChunkSize: e.target.value })} />
@@ -1112,7 +1112,7 @@ const AdminPage = () => {
                                     <button
                                         onClick={handleResetRateLimits}
                                         disabled={resettingRateLimits}
-                                        className={`flex items-center gap-2 px-4 py-2.5 text-sm rounded-xl font-medium transition-colors ${isDark ? 'bg-blue-500/20 text-blue-300 hover:bg-blue-500/30' : 'bg-blue-100 text-blue-700 hover:bg-blue-200'} disabled:opacity-50`}
+                                        className={`flex items-center gap-2 px-4 py-2.5 text-sm rounded-2xl font-medium transition-colors ${isDark ? 'bg-blue-500/20 text-blue-300 hover:bg-blue-500/30' : 'bg-blue-100 text-blue-700 hover:bg-blue-200'} disabled:opacity-50`}
                                     >
                                         {resettingRateLimits ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
                                         Reiniciar Rate Limits
@@ -1137,7 +1137,7 @@ const AdminPage = () => {
                                 <button
                                     onClick={() => fetchOpsData()}
                                     disabled={loadingOps}
-                                    className={`flex items-center gap-2 px-4 py-2.5 text-sm rounded-xl font-medium transition-colors ${isDark ? 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
+                                    className={`flex items-center gap-2 px-4 py-2.5 text-sm rounded-2xl font-medium transition-colors ${isDark ? 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
                                 >
                                     {loadingOps ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
                                     Actualizar
@@ -1176,7 +1176,7 @@ const AdminPage = () => {
                                             : (isDark ? 'text-white' : 'text-zinc-900')
                                     }
                                 ].map((item) => (
-                                    <div key={item.label} className={`p-4 rounded-xl border ${isDark ? 'border-white/10 bg-white/5' : 'border-zinc-200 bg-zinc-50'}`}>
+                                    <div key={item.label} className={`p-4 rounded-2xl border ${isDark ? 'border-white/10 bg-white/5' : 'border-zinc-200 bg-zinc-50'}`}>
                                         <p className={`text-xs uppercase tracking-wider ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
                                             {item.label}
                                         </p>
@@ -1206,7 +1206,7 @@ const AdminPage = () => {
                                     {(opsMetrics?.alerts || []).map((alert) => (
                                         <div
                                             key={alert.code}
-                                            className={`rounded-xl border px-4 py-3 ${alert.severity === 'high'
+                                            className={`rounded-2xl border px-4 py-3 ${alert.severity === 'high'
                                                 ? (isDark ? 'border-red-500/30 bg-red-500/10 text-red-200' : 'border-red-200 bg-red-50 text-red-700')
                                                 : (isDark ? 'border-amber-500/30 bg-amber-500/10 text-amber-100' : 'border-amber-200 bg-amber-50 text-amber-700')
                                             }`}
@@ -1218,7 +1218,7 @@ const AdminPage = () => {
                                         </div>
                                     ))}
                                     {(opsMetrics?.alerts || []).length === 0 && (
-                                        <div className={`rounded-xl border px-4 py-3 ${isDark ? 'border-green-500/20 bg-green-500/10 text-green-200' : 'border-green-200 bg-green-50 text-green-700'}`}>
+                                        <div className={`rounded-2xl border px-4 py-3 ${isDark ? 'border-green-500/20 bg-green-500/10 text-green-200' : 'border-green-200 bg-green-50 text-green-700'}`}>
                                             Sin alertas activas derivadas en esta muestra.
                                         </div>
                                     )}
@@ -1379,7 +1379,7 @@ const AdminPage = () => {
                                 <button
                                     onClick={() => fetchJobsData({ type: jobTypeFilter })}
                                     disabled={loadingJobs}
-                                    className={`flex items-center gap-2 px-4 py-2.5 text-sm rounded-xl font-medium transition-colors ${isDark ? 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
+                                    className={`flex items-center gap-2 px-4 py-2.5 text-sm rounded-2xl font-medium transition-colors ${isDark ? 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
                                 >
                                     {loadingJobs ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
                                     Actualizar
@@ -1394,7 +1394,7 @@ const AdminPage = () => {
                                     { key: 'failed', label: 'Fallidos' },
                                     { key: 'dead', label: 'Muertos' }
                                 ].map((item) => (
-                                    <div key={item.key} className={`p-4 rounded-xl border ${isDark ? 'border-white/10 bg-white/5' : 'border-zinc-200 bg-zinc-50'}`}>
+                                    <div key={item.key} className={`p-4 rounded-2xl border ${isDark ? 'border-white/10 bg-white/5' : 'border-zinc-200 bg-zinc-50'}`}>
                                         <p className={`text-xs uppercase tracking-wider ${isDark ? 'text-zinc-500' : 'text-zinc-400'}`}>
                                             {item.label}
                                         </p>
@@ -1422,7 +1422,7 @@ const AdminPage = () => {
                                     <button
                                         onClick={handleRetryDeadJobs}
                                         disabled={jobActionRunning === 'retry-dead'}
-                                        className={`flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium transition-colors ${isDark ? 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30' : 'bg-amber-100 text-amber-700 hover:bg-amber-200'} disabled:opacity-50`}
+                                        className={`flex items-center justify-center gap-2 px-4 py-3 rounded-2xl font-medium transition-colors ${isDark ? 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30' : 'bg-amber-100 text-amber-700 hover:bg-amber-200'} disabled:opacity-50`}
                                     >
                                         {jobActionRunning === 'retry-dead' ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
                                         Reintentar Jobs Muertos
@@ -1433,7 +1433,7 @@ const AdminPage = () => {
                                     {Object.entries(jobStats.byType || {}).map(([type, count]) => (
                                         <span
                                             key={type}
-                                            className={`px-2.5 py-1 rounded-lg text-xs font-medium ${isDark ? 'bg-zinc-800 text-zinc-300' : 'bg-white text-zinc-700 border border-zinc-200'}`}
+                                            className={`px-2.5 py-1 rounded-xl text-xs font-medium ${isDark ? 'bg-zinc-800 text-zinc-300' : 'bg-white text-zinc-700 border border-zinc-200'}`}
                                         >
                                             {type}: {count}
                                         </span>
@@ -1485,7 +1485,7 @@ const AdminPage = () => {
                                                         <button
                                                             onClick={() => handleCancelJob(job.id)}
                                                             disabled={jobActionRunning === job.id}
-                                                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${isDark ? 'bg-red-500/20 text-red-300 hover:bg-red-500/30' : 'bg-red-50 text-red-600 hover:bg-red-100'} disabled:opacity-50`}
+                                                            className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-colors ${isDark ? 'bg-red-500/20 text-red-300 hover:bg-red-500/30' : 'bg-red-50 text-red-600 hover:bg-red-100'} disabled:opacity-50`}
                                                         >
                                                             {jobActionRunning === job.id ? '...' : 'Cancelar'}
                                                         </button>
@@ -1520,7 +1520,7 @@ const AdminPage = () => {
                                 <button
                                     onClick={() => fetchAuditData(auditPagination.page, auditPagination.limit)}
                                     disabled={loadingAudit}
-                                    className={`flex items-center gap-2 px-4 py-2.5 text-sm rounded-xl font-medium transition-colors ${isDark ? 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
+                                    className={`flex items-center gap-2 px-4 py-2.5 text-sm rounded-2xl font-medium transition-colors ${isDark ? 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
                                 >
                                     {loadingAudit ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
                                     Actualizar
@@ -1579,14 +1579,14 @@ const AdminPage = () => {
                                     <button
                                         onClick={() => handleAuditPageChange(auditPagination.page - 1)}
                                         disabled={loadingAudit || auditPagination.page <= 1}
-                                        className={`px-3 py-2 rounded-lg text-sm transition-colors ${isDark ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
+                                        className={`px-3 py-2 rounded-xl text-sm transition-colors ${isDark ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
                                     >
                                         Anterior
                                     </button>
                                     <button
                                         onClick={() => handleAuditPageChange(auditPagination.page + 1)}
                                         disabled={loadingAudit || auditPagination.page >= auditPagination.totalPages}
-                                        className={`px-3 py-2 rounded-lg text-sm transition-colors ${isDark ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
+                                        className={`px-3 py-2 rounded-xl text-sm transition-colors ${isDark ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'} disabled:opacity-50`}
                                     >
                                         Siguiente
                                     </button>
@@ -1676,7 +1676,7 @@ const AdminPage = () => {
                                     <button
                                         onClick={handleTestEmail}
                                         disabled={testingEmail || !settings.smtpHost || !settings.smtpUser}
-                                        className="flex items-center gap-2 px-5 py-3 bg-green-600 text-white rounded-xl hover:bg-green-700 font-medium whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                        className="flex items-center gap-2 px-5 py-3 bg-green-600 text-white rounded-2xl hover:bg-green-700 font-medium whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                                     >
                                         {testingEmail ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
                                         Enviar Prueba
@@ -1717,14 +1717,14 @@ const AdminPage = () => {
             <div className={`mt-auto pt-6 border-t flex justify-end gap-3 flex-shrink-0 ${isDark ? 'border-zinc-800' : 'border-zinc-200'}`}>
                 <button
                     onClick={handleDiscard}
-                    className={`px-6 py-2.5 rounded-xl font-medium transition-colors ${isDark ? 'text-zinc-400 hover:text-white hover:bg-white/5' : 'text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100'}`}
+                    className={`px-6 py-2.5 rounded-2xl font-medium transition-colors ${isDark ? 'text-zinc-400 hover:text-white hover:bg-white/5' : 'text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100'}`}
                 >
                     Descartar
                 </button>
                 <button
                     onClick={handleSaveAll}
                     disabled={saving || !hasChanges()}
-                    className="px-6 py-2.5 bg-red-600 text-white rounded-xl hover:bg-red-500 font-medium transition-colors disabled:opacity-50 flex items-center gap-2"
+                    className="px-6 py-2.5 bg-red-600 text-white rounded-2xl hover:bg-red-500 font-medium transition-colors disabled:opacity-50 flex items-center gap-2"
                 >
                     {saving && <Loader2 size={16} className="animate-spin" />}
                     Guardar Cambios

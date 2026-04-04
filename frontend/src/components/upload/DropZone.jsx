@@ -129,7 +129,7 @@ const DropZone = ({ onFileSelect, options, setOptions, selectedFile, onClearFile
                     onClick={handleClick}
                 >
                     <div className="flex items-center gap-4 p-4">
-                        <div className="w-14 h-14 rounded-xl flex items-center justify-center bg-gradient-to-br from-primary-500 to-primary-600 text-white shadow-lg shadow-primary-500/30 flex-shrink-0">
+                        <div className="w-14 h-14 rounded-2xl flex items-center justify-center bg-gradient-to-br from-primary-500 to-primary-600 text-white shadow-lg shadow-primary-500/30 flex-shrink-0">
                             {renderFileIcon(selectedFile.name, { size: 28, strokeWidth: 1.5 })}
                         </div>
                         
@@ -148,7 +148,7 @@ const DropZone = ({ onFileSelect, options, setOptions, selectedFile, onClearFile
                         
                         <button 
                             onClick={(e) => { e.stopPropagation(); onClearFile(); }}
-                            className="p-2 text-gray-400 hover:text-primary-600 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-all"
+                            className="p-2 text-gray-400 hover:text-primary-600 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-xl transition-all"
                         >
                             <X size={20} />
                         </button>
@@ -169,7 +169,7 @@ const DropZone = ({ onFileSelect, options, setOptions, selectedFile, onClearFile
                         <label className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-3">
                             <Clock size={14} /> Expiración
                         </label>
-                        <div className="flex flex-wrap gap-2 p-1.5 bg-gray-100 dark:bg-gray-800 rounded-xl">
+                        <div className="flex flex-wrap gap-2 p-1.5 bg-gray-100 dark:bg-gray-800 rounded-2xl">
                             {[
                                 { value: '1', label: '1 día' },
                                 { value: '3', label: '3 días' },
@@ -181,7 +181,7 @@ const DropZone = ({ onFileSelect, options, setOptions, selectedFile, onClearFile
                                     type="button"
                                     onClick={() => setOptions({ ...options, expires: opt.value })}
                                     className={clsx(
-                                        'flex-1 min-w-[70px] px-3 py-2.5 rounded-lg text-sm font-medium transition-all',
+                                        'flex-1 min-w-[70px] px-3 py-2.5 rounded-xl text-sm font-medium transition-all',
                                         options.expires === opt.value
                                             ? 'bg-white dark:bg-gray-700 text-primary-600 dark:text-primary-400 shadow-sm'
                                             : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
@@ -221,7 +221,7 @@ const DropZone = ({ onFileSelect, options, setOptions, selectedFile, onClearFile
                                         <input
                                             type={showPassword ? 'text' : 'password'}
                                             placeholder="Ingresa una contraseña..."
-                                            className="w-full px-4 py-3 pr-12 rounded-xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-white outline-none focus:ring-2 focus:ring-primary-500 transition-all text-sm"
+                                            className="w-full px-4 py-3 pr-12 rounded-2xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-white outline-none focus:ring-2 focus:ring-primary-500 transition-all text-sm"
                                             value={options.password}
                                             onChange={(e) => setOptions({ ...options, password: e.target.value })}
                                             autoComplete="new-password"
@@ -237,7 +237,7 @@ const DropZone = ({ onFileSelect, options, setOptions, selectedFile, onClearFile
                                     <button
                                         type="button"
                                         onClick={generatePassword}
-                                        className="px-3 py-3 bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex items-center gap-2 text-gray-600 dark:text-gray-300"
+                                        className="px-3 py-3 bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex items-center gap-2 text-gray-600 dark:text-gray-300"
                                         title="Generar contraseña segura"
                                     >
                                         <RefreshCw size={18} />
@@ -292,12 +292,12 @@ const DropZone = ({ onFileSelect, options, setOptions, selectedFile, onClearFile
                 </div>
 
                 <div className={clsx(
-                    "w-20 h-20 rounded-2xl flex items-center justify-center mb-6 transition-all duration-300",
+                    "w-24 h-24 flex items-center justify-center mb-6 transition-all duration-300",
                     isDragging 
-                        ? "scale-110 bg-primary-500 text-white shadow-lg shadow-primary-500/30" 
-                        : "bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-800 dark:to-gray-700 text-gray-400 dark:text-gray-500"
+                        ? "scale-110 text-primary-500 drop-shadow-lg" 
+                        : "text-gray-400 dark:text-gray-500"
                 )}>
-                    <Upload size={40} strokeWidth={1.5} />
+                    <Upload size={64} strokeWidth={1.5} />
                 </div>
                 
                 <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">
@@ -310,7 +310,7 @@ const DropZone = ({ onFileSelect, options, setOptions, selectedFile, onClearFile
                 
                 <button 
                     type="button"
-                    className="px-8 py-3 bg-gradient-to-r from-primary-600 to-primary-500 hover:from-primary-700 hover:to-primary-600 text-white rounded-xl font-bold shadow-lg shadow-primary-600/30 transition-all transform hover:scale-105 active:scale-95"
+                    className="px-8 py-3 bg-gradient-to-r from-primary-600 to-primary-500 hover:from-primary-700 hover:to-primary-600 text-white rounded-2xl font-bold shadow-lg shadow-primary-600/30 transition-all transform hover:scale-105 active:scale-95"
                     onClick={(e) => {
                         e.stopPropagation();
                         handleClick();

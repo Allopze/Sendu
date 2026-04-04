@@ -35,7 +35,7 @@ const UploadResult = ({ fileId }) => {
                     />
                     <button
                         onClick={handleCopy}
-                        className={`px-5 py-2.5 rounded-xl font-medium transition-all flex items-center gap-2 ${
+                        className={`px-5 py-2.5 rounded-2xl font-medium transition-all flex items-center gap-2 ${
                             copied 
                                 ? 'bg-green-500 text-white' 
                                 : 'bg-primary-600 hover:bg-primary-700 text-white'
@@ -59,14 +59,14 @@ const UploadResult = ({ fileId }) => {
                 <div className="flex flex-wrap justify-center gap-4">
                     <Link
                         to={`/share/${fileId}`}
-                        className="flex items-center gap-2 px-6 py-3 bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 rounded-xl hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors font-medium"
+                        className="flex items-center gap-2 px-6 py-3 bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 rounded-2xl hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors font-medium"
                     >
                         <ExternalLink size={18} />
                         Ver archivo
                     </Link>
                     <button
                         onClick={() => window.location.reload()}
-                        className="flex items-center gap-2 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white rounded-xl transition-colors font-medium"
+                        className="flex items-center gap-2 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white rounded-2xl transition-colors font-medium"
                     >
                         <Plus size={18} />
                         Crear otro envío
@@ -74,7 +74,7 @@ const UploadResult = ({ fileId }) => {
                     {user && (
                         <Link
                             to="/dashboard"
-                            className="flex items-center gap-2 px-6 py-3 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors font-medium"
+                            className="flex items-center gap-2 px-6 py-3 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-2xl hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors font-medium"
                         >
                             <FolderOpen size={18} />
                             Ver mis envíos

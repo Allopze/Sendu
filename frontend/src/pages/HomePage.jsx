@@ -504,7 +504,7 @@ const HomePage = () => {
                         <div className="flex gap-3 flex-shrink-0">
                             <button
                                 onClick={() => fileInputRef.current?.click()}
-                                className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-all hover:scale-105 active:scale-95 whitespace-nowrap ${
+                                className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-xl border transition-all hover:scale-105 active:scale-95 whitespace-nowrap ${
                                     isDark 
                                         ? 'border-blue-500/50 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 hover:border-blue-400' 
                                         : 'border-blue-400 bg-blue-50 text-blue-600 hover:bg-blue-100'
@@ -516,7 +516,7 @@ const HomePage = () => {
                             </button>
                             <button
                                 onClick={() => folderInputRef.current?.click()}
-                                className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-all hover:scale-105 active:scale-95 whitespace-nowrap ${
+                                className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-xl border transition-all hover:scale-105 active:scale-95 whitespace-nowrap ${
                                     isDark 
                                         ? 'border-yellow-500/50 bg-yellow-500/10 text-yellow-400 hover:bg-yellow-500/20 hover:border-yellow-400' 
                                         : 'border-yellow-500 bg-yellow-50 text-yellow-600 hover:bg-yellow-100'
@@ -529,7 +529,7 @@ const HomePage = () => {
                             <div className={`w-px ${isDark ? 'bg-zinc-700' : 'bg-zinc-300'}`}></div>
                             <button
                                 onClick={handleClearFiles}
-                                className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-all hover:scale-105 active:scale-95 whitespace-nowrap ${
+                                className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-xl border transition-all hover:scale-105 active:scale-95 whitespace-nowrap ${
                                     isDark 
                                         ? 'border-red-500/50 bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:border-red-400' 
                                         : 'border-red-400 bg-red-50 text-red-600 hover:bg-red-100'
@@ -543,7 +543,7 @@ const HomePage = () => {
                     </div>
 
                     {/* Lista scrolleable */}
-                    <div className={`flex-1 overflow-y-auto rounded-xl border ${isDark ? 'border-zinc-800 bg-zinc-900/50' : 'border-zinc-200 bg-zinc-50/50'}`}>
+                    <div className={`flex-1 overflow-y-auto rounded-2xl border ${isDark ? 'border-zinc-800 bg-zinc-900/50' : 'border-zinc-200 bg-zinc-50/50'}`}>
                         <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
                             {pendingFiles.map((item, index) => {
                                 const { icon: FileIcon, color } = getFileIcon(item.file.name);
@@ -586,7 +586,7 @@ const HomePage = () => {
                                 value={options.expires}
                                 onChange={(e) => setOptions({ ...options, expires: e.target.value })}
                                 className={`
-                                    w-full p-3 rounded-xl outline-none border transition-colors appearance-none cursor-pointer
+                                    w-full p-3 rounded-2xl outline-none border transition-colors appearance-none cursor-pointer
                                     ${isDark ? 'bg-zinc-800/50 border-zinc-700 text-zinc-200 focus:border-red-500' : 'bg-zinc-50 border-zinc-200 text-zinc-700 focus:border-red-500'}
                                 `}
                             >
@@ -610,7 +610,7 @@ const HomePage = () => {
                                         if (e.target.value && !usePassword) setUsePassword(true);
                                     }}
                                     className={`
-                                        w-full p-3 pr-20 rounded-xl outline-none border transition-all
+                                        w-full p-3 pr-20 rounded-2xl outline-none border transition-all
                                         ${isDark ? 'bg-zinc-800/50 border-zinc-700 text-zinc-200 placeholder-zinc-600 focus:border-red-500' : 'bg-zinc-50 border-zinc-200 text-zinc-700 placeholder-zinc-400 focus:border-red-500'}
                                     `}
                                 />
@@ -687,8 +687,8 @@ const HomePage = () => {
                         </div>
                     ) : (
                         <div className="mb-6">
-                            <div className={`w-24 h-24 rounded-2xl flex items-center justify-center ${isDark ? 'bg-red-500/20' : 'bg-red-100'}`}>
-                                <Upload size={48} className="text-red-500 animate-bounce" />
+                            <div className="w-24 h-24 flex items-center justify-center text-red-500">
+                                <Upload size={72} className="animate-bounce" />
                             </div>
                         </div>
                     )}
@@ -734,7 +734,7 @@ const HomePage = () => {
                 {/* Botón Cancelar */}
                 <button 
                     onClick={handleCancel}
-                    className="w-full py-3 rounded-xl font-medium transition-all flex items-center justify-center gap-2 bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300"
+                    className="w-full py-3 rounded-2xl font-medium transition-all flex items-center justify-center gap-2 bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300"
                     aria-label="Cancelar subida"
                 >
                     <X size={18} />
@@ -811,7 +811,7 @@ const HomePage = () => {
                 </div>
                 
                 {/* URL para compartir */}
-                <div className={`w-full p-1 pl-4 rounded-xl flex items-center justify-between mb-4 transition-all duration-300 ${
+                <div className={`w-full p-1 pl-4 rounded-2xl flex items-center justify-between mb-4 transition-all duration-300 ${
                     isDark ? 'bg-zinc-900 border border-zinc-700' : 'bg-zinc-50 border border-zinc-200'
                 } ${copied ? 'ring-2 ring-green-500' : ''}`}>
                     <span className={`text-sm truncate mr-4 ${isDark ? 'text-zinc-300' : 'text-zinc-600'}`}>
@@ -819,7 +819,7 @@ const HomePage = () => {
                     </span>
                     <button 
                         onClick={handleCopy}
-                        className={`px-6 py-3 rounded-lg font-medium transition-all flex items-center gap-2 flex-shrink-0 ${
+                        className={`px-6 py-3 rounded-xl font-medium transition-all flex items-center gap-2 flex-shrink-0 ${
                             copied ? 'bg-green-500 text-white' : 'bg-red-600 hover:bg-red-500 text-white'
                         }`}
                         aria-label={copied ? 'Enlace copiado' : 'Copiar enlace compartido'}
@@ -833,7 +833,7 @@ const HomePage = () => {
                 <div className="grid grid-cols-2 gap-3">
                     <Link
                         to={`/share/${result?.fileId}`}
-                        className={`flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium transition-colors ${
+                        className={`flex items-center justify-center gap-2 px-4 py-3 rounded-2xl font-medium transition-colors ${
                             isDark ? 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'
                         }`}
                     >
@@ -842,7 +842,7 @@ const HomePage = () => {
                     </Link>
                     <button 
                         onClick={handleReset}
-                        className="flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium bg-red-600 hover:bg-red-500 text-white transition-colors"
+                        className="flex items-center justify-center gap-2 px-4 py-3 rounded-2xl font-medium bg-red-600 hover:bg-red-500 text-white transition-colors"
                     >
                         <Plus size={18} />
                         Nuevo envío
@@ -850,7 +850,7 @@ const HomePage = () => {
                     {user && (
                         <Link
                             to="/dashboard"
-                            className={`col-span-2 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium transition-colors ${
+                            className={`col-span-2 flex items-center justify-center gap-2 px-4 py-3 rounded-2xl font-medium transition-colors ${
                                 isDark ? 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'
                             }`}
                         >

@@ -71,7 +71,7 @@ export default function Tooltip({ children, text, position = 'top' }) {
                     style={{ top: coords.top, left: coords.left }}
                 >
                     <div className="relative">
-                        <div className="px-2.5 py-1.5 text-xs font-medium text-white bg-gray-900 dark:bg-gray-700 rounded-lg shadow-lg whitespace-nowrap animate-fade-in">
+                        <div className="px-2.5 py-1.5 text-xs font-medium text-white bg-gray-900 dark:bg-gray-700 rounded-xl shadow-lg whitespace-nowrap animate-fade-in">
                             {text}
                         </div>
                         <div className={`absolute w-0 h-0 border-4 ${arrowClasses[position]}`} />

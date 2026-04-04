@@ -29,7 +29,7 @@ const FileInfo = ({ file, onDownload, error }) => {
             </div>
 
             {error && (
-                <div className="mb-4 p-3 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded-lg flex items-center gap-2 text-sm">
+                <div className="mb-4 p-3 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded-xl flex items-center gap-2 text-sm">
                     <AlertCircle size={16} />
                     <span>{error}</span>
                 </div>
@@ -37,7 +37,7 @@ const FileInfo = ({ file, onDownload, error }) => {
 
             <button
                 onClick={onDownload}
-                className="w-full py-3 bg-primary-600 text-white rounded-xl hover:bg-primary-700 font-bold transition-all transform hover:scale-[1.02] flex items-center justify-center gap-2"
+                className="w-full py-3 bg-primary-600 text-white rounded-2xl hover:bg-primary-700 font-bold transition-all transform hover:scale-[1.02] flex items-center justify-center gap-2"
             >
                 <Download size={20} />
                 Descargar Archivo

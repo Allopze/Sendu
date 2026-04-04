@@ -88,7 +88,7 @@ const UploadProgressToast = () => {
                 {/* Header */}
                 <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                        <div className="p-1.5 bg-primary-100 dark:bg-primary-900/30 rounded-lg">
+                        <div className="p-1.5 bg-primary-100 dark:bg-primary-900/30 rounded-xl">
                             <Upload size={16} className="text-primary-600" />
                         </div>
                         <div className="flex flex-col">

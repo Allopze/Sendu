@@ -128,10 +128,10 @@ const DashboardPage = () => {
 
             {/* Stats Cards */}
             <div className="flex-shrink-0 grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                <div className={`rounded-2xl p-5 ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
+                <div className={`rounded-3xl p-5 ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
                     <div className="flex items-center gap-4">
-                        <div className={`p-3 rounded-xl ${isDark ? 'bg-red-500/20' : 'bg-red-100'}`}>
-                            <FolderOpen size={22} className="text-red-500" />
+                        <div className="text-red-500 px-1">
+                            <FolderOpen size={36} />
                         </div>
                         <div>
                             <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>Archivos</p>
@@ -141,10 +141,10 @@ const DashboardPage = () => {
                         </div>
                     </div>
                 </div>
-                <div className={`rounded-2xl p-5 ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
+                <div className={`rounded-3xl p-5 ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
                     <div className="flex items-center gap-4">
-                        <div className={`p-3 rounded-xl ${isDark ? 'bg-blue-500/20' : 'bg-blue-100'}`}>
-                            <HardDrive size={22} className="text-blue-500" />
+                        <div className="text-blue-500 px-1">
+                            <HardDrive size={36} />
                         </div>
                         <div>
                             <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>Almacenamiento</p>
@@ -154,10 +154,10 @@ const DashboardPage = () => {
                         </div>
                     </div>
                 </div>
-                <div className={`rounded-2xl p-5 ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
+                <div className={`rounded-3xl p-5 ${isDark ? 'bg-white/5 border border-white/10' : 'bg-zinc-50 border border-zinc-100'}`}>
                     <div className="flex items-center gap-4">
-                        <div className={`p-3 rounded-xl ${isDark ? 'bg-green-500/20' : 'bg-green-100'}`}>
-                            <Download size={22} className="text-green-500" />
+                        <div className="text-green-500 px-1">
+                            <Download size={36} />
                         </div>
                         <div>
                             <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-zinc-500'}`}>Descargas</p>
@@ -178,8 +178,8 @@ const DashboardPage = () => {
                 {files.length === 0 ? (
                     <div className="flex-1 flex items-center justify-center">
                         <div className="text-center">
-                            <div className={`p-4 rounded-full mx-auto w-fit mb-4 ${isDark ? 'bg-zinc-800' : 'bg-zinc-200'}`}>
-                                <FolderOpen size={32} className={isDark ? 'text-zinc-600' : 'text-zinc-400'} />
+                            <div className="mx-auto w-fit mb-4">
+                                <FolderOpen size={48} className={isDark ? 'text-zinc-600' : 'text-zinc-400'} />
                             </div>
                             <p className={isDark ? 'text-zinc-400' : 'text-zinc-500'}>
                                 No tienes archivos subidos aún
@@ -200,7 +200,7 @@ const DashboardPage = () => {
                             return (
                                 <div 
                                     key={file.id}
-                                    className={`p-4 rounded-xl transition-all ${
+                                    className={`p-4 rounded-2xl transition-all ${
                                         expStatus.expired 
                                             ? isDark ? 'bg-red-900/20 border border-red-500/30' : 'bg-red-50 border border-red-200'
                                             : isDark ? 'bg-zinc-800/50 hover:bg-zinc-800' : 'bg-white hover:bg-zinc-50 border border-zinc-200'
@@ -218,7 +218,7 @@ const DashboardPage = () => {
                                                 type="button"
                                                 onClick={() => handleCopy(file.id)}
                                                 aria-label={`Copiar enlace de ${file.originalName}`}
-                                                className={`p-2 rounded-lg transition-colors ${
+                                                className={`p-2 rounded-xl transition-colors ${
                                                     copiedId === file.id 
                                                         ? 'bg-green-500 text-white' 
                                                         : isDark ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-600'
@@ -232,7 +232,7 @@ const DashboardPage = () => {
                                                 target="_blank"
                                                 rel="noopener noreferrer"
                                                 aria-label={`Abrir ${file.originalName} en una nueva pestaña`}
-                                                className={`p-2 rounded-lg transition-colors ${isDark ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-600'}`}
+                                                className={`p-2 rounded-xl transition-colors ${isDark ? 'hover:bg-zinc-700 text-zinc-400' : 'hover:bg-zinc-200 text-zinc-600'}`}
                                                 title="Ver archivo"
                                             >
                                                 <ExternalLink size={16} />
@@ -241,7 +241,7 @@ const DashboardPage = () => {
                                                 type="button"
                                                 onClick={() => handleDelete(file.id, file.originalName)}
                                                 aria-label={`Eliminar ${file.originalName}`}
-                                                className="p-2 rounded-lg hover:bg-red-500/10 text-red-500 transition-colors"
+                                                className="p-2 rounded-xl hover:bg-red-500/10 text-red-500 transition-colors"
                                                 title="Eliminar"
                                             >
                                                 <Trash2 size={16} />
@@ -252,27 +252,27 @@ const DashboardPage = () => {
                                     {/* File metadata row */}
                                     <div className="flex flex-wrap items-center gap-3 mt-3 pt-3 border-t border-zinc-700/30">
                                         {/* Downloads */}
-                                        <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg ${isDark ? 'bg-zinc-700/50 text-zinc-400' : 'bg-zinc-100 text-zinc-600'}`}>
+                                        <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-xl ${isDark ? 'bg-zinc-700/50 text-zinc-400' : 'bg-zinc-100 text-zinc-600'}`}>
                                             <Download size={12} />
                                             {file.downloadCount} {file.downloadCount === 1 ? 'descarga' : 'descargas'}
                                         </span>
                                         
                                         {/* Expiration */}
-                                        <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg ${colorMap[expStatus.color]}`}>
+                                        <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-xl ${colorMap[expStatus.color]}`}>
                                             <Clock size={12} />
                                             {expStatus.text}
                                         </span>
                                         
                                         {/* Password protected */}
                                         {file.hasPassword && (
-                                            <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg ${isDark ? 'bg-purple-500/20 text-purple-400' : 'bg-purple-100 text-purple-600'}`}>
+                                            <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-xl ${isDark ? 'bg-purple-500/20 text-purple-400' : 'bg-purple-100 text-purple-600'}`}>
                                                 <Lock size={12} />
                                                 Protegido
                                             </span>
                                         )}
                                         
                                         {/* Upload date */}
-                                        <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg ${isDark ? 'bg-zinc-700/50 text-zinc-500' : 'bg-zinc-100 text-zinc-500'}`}>
+                                        <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-xl ${isDark ? 'bg-zinc-700/50 text-zinc-500' : 'bg-zinc-100 text-zinc-500'}`}>
                                             <Calendar size={12} />
                                             {formatDate(file.createdAt)}
                                         </span>

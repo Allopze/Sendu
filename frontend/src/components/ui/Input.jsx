@@ -30,7 +30,7 @@ const Input = forwardRef(({
         type={type} 
         placeholder={placeholder}
         className={`
-          w-full p-3 rounded-xl border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/60
+          w-full p-3 rounded-2xl border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/60
           ${isDark 
             ? 'bg-zinc-800/50 border-zinc-700 text-zinc-200 focus-visible:border-red-500 focus-visible:bg-zinc-800 placeholder:text-zinc-600' 
             : 'bg-zinc-50 border-zinc-200 text-zinc-700 focus-visible:border-red-500 focus-visible:bg-white placeholder:text-zinc-400'

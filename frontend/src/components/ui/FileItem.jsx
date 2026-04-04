@@ -37,12 +37,12 @@ const FileItem = ({ name, size, onDelete }) => {
   
   return (
     <div className={`
-      group flex items-center justify-between p-3 rounded-lg mb-2 transition-all duration-300
+      group flex items-center justify-between p-3 rounded-xl mb-2 transition-all duration-300
       ${isDark ? 'bg-white/5 hover:bg-white/10' : 'bg-zinc-50 hover:bg-white hover:shadow-md'}
       border border-transparent hover:border-zinc-200 dark:hover:border-zinc-700
     `}>
       <div className="flex items-center gap-3 overflow-hidden flex-1 min-w-0">
-        <div className={`p-2 rounded-lg flex-shrink-0 ${isDark ? 'bg-zinc-800' : 'bg-zinc-200'} text-zinc-500`}>
+        <div className={`p-2 rounded-xl flex-shrink-0 ${isDark ? 'bg-zinc-800' : 'bg-zinc-200'} text-zinc-500`}>
           {renderFileIcon(name, { size: 18 })}
         </div>
         <div className="flex flex-col min-w-0 flex-1">

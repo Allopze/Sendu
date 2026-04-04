@@ -58,8 +58,8 @@ const RegisterPage = () => {
         <div className="w-full animate-enter">
             {/* Header */}
             <div className="text-center mb-8">
-                <div className="w-12 h-12 bg-red-600 rounded-lg mx-auto flex items-center justify-center mb-4 text-white">
-                    <UserPlus size={24} />
+                <div className="w-16 h-16 mx-auto flex items-center justify-center mb-4 text-red-600">
+                    <UserPlus size={48} />
                 </div>
                 <h2 className={`text-2xl font-bold mb-2 ${isDark ? 'text-white' : 'text-zinc-900'}`}>
                     Crear Cuenta

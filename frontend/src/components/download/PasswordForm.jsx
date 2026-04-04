@@ -43,13 +43,13 @@ const PasswordForm = ({ file, onSubmit, error }) => {
             
             <p className="text-gray-500 mb-6">Este archivo está protegido con contraseña.</p>
 
-            {error && <div className="bg-red-100 text-red-700 p-3 rounded-lg mb-4 text-sm">{error}</div>}
+            {error && <div className="bg-red-100 text-red-700 p-3 rounded-xl mb-4 text-sm">{error}</div>}
 
             <form onSubmit={handleSubmit} className="space-y-4">
                 <input
                     type="password"
                     placeholder="Introduce la contraseña"
-                    className="w-full px-4 py-3 rounded-xl bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 focus:ring-2 focus:ring-primary-500 outline-none transition-all text-center"
+                    className="w-full px-4 py-3 rounded-2xl bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 focus:ring-2 focus:ring-primary-500 outline-none transition-all text-center"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
@@ -57,7 +57,7 @@ const PasswordForm = ({ file, onSubmit, error }) => {
                 />
                 <button
                     type="submit"
-                    className="w-full py-3 bg-primary-600 text-white rounded-xl hover:bg-primary-700 font-bold transition-all transform hover:scale-[1.02]"
+                    className="w-full py-3 bg-primary-600 text-white rounded-2xl hover:bg-primary-700 font-bold transition-all transform hover:scale-[1.02]"
                 >
                     Desbloquear y Descargar
                 </button>

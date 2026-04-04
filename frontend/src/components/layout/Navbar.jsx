@@ -36,13 +36,13 @@ const Navbar = () => {
             {/* Logo */}
             <Link
                 to="/"
-                className="flex items-center gap-3 cursor-pointer rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70"
+                className="flex items-center gap-3 cursor-pointer rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70"
                 aria-label="Ir a la página principal"
             >
                 {hasLogo ? (
                     <img src={currentLogo} alt="Logo" className="h-10 w-auto object-contain" />
                 ) : (
-                    <div className="w-10 h-10 bg-red-600 rounded-lg flex items-center justify-center">
+                    <div className="w-10 h-10 bg-red-600 rounded-xl flex items-center justify-center">
                         <div className="w-4 h-4 bg-white rounded-sm opacity-90"></div>
                     </div>
                 )}
@@ -88,7 +88,7 @@ const Navbar = () => {
                         {isUserMenuOpen && (
                             <>
                                 <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
-                                <div className={`absolute right-0 mt-2 w-48 py-2 rounded-xl shadow-xl border animate-enter origin-top-right z-50 ${
+                                <div className={`absolute right-0 mt-2 w-48 py-2 rounded-2xl shadow-xl border animate-enter origin-top-right z-50 ${
                                     isDark ? 'bg-[#1a1a1a] border-zinc-800' : 'bg-white border-zinc-200'
                                 }`} role="menu" aria-label="Menú de usuario">
                                     {/* Mis Archivos - for all logged in users */}
@@ -141,7 +141,7 @@ const Navbar = () => {
                         </Link>
                         <Link
                             to="/register"
-                            className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded-xl transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70"
+                            className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded-2xl transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70"
                         >
                             Registrarse
                         </Link>

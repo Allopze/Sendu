@@ -100,7 +100,7 @@ const ConfirmModal = ({
                         type="button"
                         onClick={onClose}
                         aria-label="Cerrar modal"
-                        className={`p-1 rounded-lg transition-colors ${
+                        className={`p-1 rounded-xl transition-colors ${
                             isDark ? 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100'
                         }`}
                     >
@@ -113,7 +113,7 @@ const ConfirmModal = ({
                     <button
                         type="button"
                         onClick={onClose}
-                        className={`px-4 py-2 text-sm font-medium rounded-xl transition-colors ${
+                        className={`px-4 py-2 text-sm font-medium rounded-2xl transition-colors ${
                             isDark ? 'text-zinc-300 bg-zinc-800 hover:bg-zinc-700' : 'text-zinc-700 bg-zinc-100 hover:bg-zinc-200'
                         }`}
                     >
@@ -122,7 +122,7 @@ const ConfirmModal = ({
                     <button
                         type="button"
                         onClick={handleConfirm}
-                        className={`px-4 py-2 text-sm font-medium text-white rounded-xl transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 ${variantStyles[variant]}`}
+                        className={`px-4 py-2 text-sm font-medium text-white rounded-2xl transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 ${variantStyles[variant]}`}
                     >
                         {confirmText}
                     </button>

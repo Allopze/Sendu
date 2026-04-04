@@ -11,22 +11,22 @@ const FileCard = ({ file, onDelete }) => {
     };
 
     return (
-        <div className="glass p-5 rounded-xl hover:shadow-lg transition-all duration-300 group">
+        <div className="glass p-5 rounded-2xl hover:shadow-lg transition-all duration-300 group">
             <div className="flex items-start justify-between mb-4">
-                <div className="p-3 bg-primary-100 dark:bg-primary-900/30 rounded-xl text-primary-600">
+                <div className="p-3 bg-primary-100 dark:bg-primary-900/30 rounded-2xl text-primary-600">
                     <FileIcon size={24} />
                 </div>
                 <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                     <Link
                         to={`/share/${file.id}`}
-                        className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl text-gray-500 hover:text-primary-600 transition-colors"
+                        className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-2xl text-gray-500 hover:text-primary-600 transition-colors"
                         title="Download Page"
                     >
                         <Download size={18} />
                     </Link>
                     <button
                         onClick={() => onDelete(file.id, file.originalName)}
-                        className="p-2 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-xl text-gray-500 hover:text-red-600 transition-colors"
+                        className="p-2 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-2xl text-gray-500 hover:text-red-600 transition-colors"
                         title="Delete File"
                     >
                         <Trash2 size={18} />
@@ -47,7 +47,7 @@ const FileCard = ({ file, onDelete }) => {
                         <span>{new Date(file.createdAt).toLocaleDateString()}</span>
                     </div>
                 </div>
-                <div className="bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded-lg text-gray-600 dark:text-gray-400">
+                <div className="bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded-xl text-gray-600 dark:text-gray-400">
                     {file.downloadCount} Downloads
                 </div>
             </div>

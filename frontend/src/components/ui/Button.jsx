@@ -13,7 +13,7 @@ const Button = forwardRef(({
   type = 'button',
   ...props
 }, ref) => {
-  const baseStyle = "relative overflow-hidden font-medium transition-all duration-200 active:scale-[0.97] rounded-xl flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed";
+  const baseStyle = "relative overflow-hidden font-medium transition-all duration-200 active:scale-[0.97] rounded-2xl flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed";
   
   const sizeStyles = {
     default: "px-6 py-4",

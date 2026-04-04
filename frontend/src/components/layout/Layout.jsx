@@ -39,8 +39,8 @@ const Layout = () => {
     const renderPanel = (variant) => {
         const preset = panelPresets[variant];
         return (
-            <div className={`glass-panel w-full ${preset.container} rounded-[32px] p-1 transition-all duration-500 ease-out animate-enter`}>
-                <div className={`h-full w-full rounded-[28px] p-6 sm:p-8 flex flex-col ${preset.inner}`}>
+            <div className={`glass-panel w-full ${preset.container} rounded-[48px] p-1 transition-all duration-500 ease-out animate-enter`}>
+                <div className={`h-full w-full rounded-[44px] p-6 sm:p-8 flex flex-col ${preset.inner}`}>
                     <Outlet />
                 </div>
             </div>

@@ -145,8 +145,8 @@ const ResetPasswordPage = () => {
         <div className="w-full animate-enter">
             {/* Header */}
             <div className="text-center mb-8">
-                <div className="w-16 h-16 mx-auto bg-red-600 rounded-full flex items-center justify-center mb-4">
-                    <Lock size={32} className="text-white" />
+                <div className="w-16 h-16 mx-auto flex items-center justify-center mb-4 text-red-600">
+                    <Lock size={48} />
                 </div>
                 <h2 className={`text-2xl font-bold mb-2 ${isDark ? 'text-white' : 'text-zinc-900'}`}>
                     Nueva Contraseña

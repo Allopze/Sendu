@@ -122,7 +122,7 @@ const UploadProgress = ({ file, progress, onCancel, uploadSpeed = 0, eta = null,
                 {/* Botón cancelar */}
                 <button 
                     onClick={onCancel} 
-                    className="flex items-center gap-2 px-4 py-2 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-xl transition-all text-sm font-medium mt-4"
+                    className="flex items-center gap-2 px-4 py-2 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-2xl transition-all text-sm font-medium mt-4"
                 >
                     <X size={16} />
                     Cancelar subida

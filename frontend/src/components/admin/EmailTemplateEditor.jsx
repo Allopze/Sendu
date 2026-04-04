@@ -170,13 +170,13 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
 
     const allVariables = [...EMAIL_VARIABLES, ...customVariables];
 
-    const inputClass = `w-full px-4 py-3 rounded-xl outline-none transition-all ${
+    const inputClass = `w-full px-4 py-3 rounded-2xl outline-none transition-all ${
         isDark 
             ? 'bg-zinc-800/50 border border-zinc-700 text-white placeholder-zinc-500 focus:border-red-500' 
             : 'bg-zinc-50 border border-zinc-200 text-zinc-900 placeholder-zinc-400 focus:border-red-500'
     }`;
 
-    const cardClass = `rounded-xl p-4 ${isDark ? 'bg-zinc-800/30 border border-zinc-700/50' : 'bg-zinc-50 border border-zinc-200'}`;
+    const cardClass = `rounded-2xl p-4 ${isDark ? 'bg-zinc-800/30 border border-zinc-700/50' : 'bg-zinc-50 border border-zinc-200'}`;
 
     return (
         <div className="space-y-5">
@@ -191,7 +191,7 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
                         <button
                             key={key}
                             onClick={() => setSelectedTemplate(key)}
-                            className={`relative flex flex-col items-center gap-2 p-4 rounded-xl transition-all ${
+                            className={`relative flex flex-col items-center gap-2 p-4 rounded-2xl transition-all ${
                                 isActive
                                     ? isDark 
                                         ? 'bg-zinc-700 ring-2 ring-red-500' 
@@ -201,7 +201,7 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
                                         : 'bg-zinc-50 hover:bg-white border border-zinc-200 hover:shadow-md'
                             }`}
                         >
-                            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
                                 isDark ? config.bgDark : config.bgLight
                             }`}>
                                 <Icon size={20} className={isDark ? config.textDark : config.textLight} />
@@ -266,7 +266,7 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
                                     key={i}
                                     onClick={() => insertVariable(v.key)}
                                     title={v.description}
-                                    className={`group px-3 py-1.5 rounded-lg text-xs font-mono transition-all flex items-center gap-1.5 ${
+                                    className={`group px-3 py-1.5 rounded-xl text-xs font-mono transition-all flex items-center gap-1.5 ${
                                         isDark 
                                             ? 'bg-zinc-700/50 text-red-400 hover:bg-red-600/20 border border-zinc-600 hover:border-red-500/50' 
                                             : 'bg-white text-red-600 hover:bg-red-50 border border-zinc-200 hover:border-red-300'
@@ -298,7 +298,7 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
                                     value={newVarKey}
                                     onChange={(e) => setNewVarKey(e.target.value)}
                                     placeholder="nombre"
-                                    className={`flex-1 px-3 py-2 text-sm rounded-lg outline-none transition-all ${
+                                    className={`flex-1 px-3 py-2 text-sm rounded-xl outline-none transition-all ${
                                         isDark 
                                             ? 'bg-zinc-800 border border-zinc-600 text-white placeholder-zinc-500 focus:border-red-500' 
                                             : 'bg-white border border-zinc-300 text-zinc-900 placeholder-zinc-400 focus:border-red-500'
@@ -309,7 +309,7 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
                                     value={newVarDesc}
                                     onChange={(e) => setNewVarDesc(e.target.value)}
                                     placeholder="Descripción"
-                                    className={`flex-1 px-3 py-2 text-sm rounded-lg outline-none transition-all ${
+                                    className={`flex-1 px-3 py-2 text-sm rounded-xl outline-none transition-all ${
                                         isDark 
                                             ? 'bg-zinc-800 border border-zinc-600 text-white placeholder-zinc-500 focus:border-red-500' 
                                             : 'bg-white border border-zinc-300 text-zinc-900 placeholder-zinc-400 focus:border-red-500'
@@ -318,7 +318,7 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
                                 <button
                                     onClick={addCustomVariable}
                                     disabled={!newVarKey.trim()}
-                                    className="px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    className="px-3 py-2 bg-red-600 text-white rounded-xl hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
                                     <Plus size={18} />
                                 </button>
@@ -330,10 +330,10 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
 
             {/* View Mode Toggle & Actions */}
             <div className="flex items-center justify-between">
-                <div className={`flex p-1 rounded-xl ${isDark ? 'bg-zinc-800/50' : 'bg-zinc-100'}`}>
+                <div className={`flex p-1 rounded-2xl ${isDark ? 'bg-zinc-800/50' : 'bg-zinc-100'}`}>
                     <button
                         onClick={() => setViewMode('code')}
-                        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                        className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all ${
                             viewMode === 'code'
                                 ? isDark ? 'bg-zinc-700 text-white' : 'bg-white text-zinc-900 shadow-sm'
                                 : isDark ? 'text-zinc-400 hover:text-white' : 'text-zinc-500 hover:text-zinc-700'
@@ -344,7 +344,7 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
                     </button>
                     <button
                         onClick={() => setViewMode('preview')}
-                        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                        className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all ${
                             viewMode === 'preview'
                                 ? isDark ? 'bg-zinc-700 text-white' : 'bg-white text-zinc-900 shadow-sm'
                                 : isDark ? 'text-zinc-400 hover:text-white' : 'text-zinc-500 hover:text-zinc-700'
@@ -357,7 +357,7 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
                 <div className="flex items-center gap-2">
                     <button
                         onClick={resetTemplate}
-                        className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-all ${
+                        className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition-all ${
                             isDark 
                                 ? 'text-zinc-400 hover:text-red-400 hover:bg-zinc-800' 
                                 : 'text-zinc-500 hover:text-red-600 hover:bg-zinc-100'
@@ -370,7 +370,7 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
                     <button
                         onClick={handleSave}
                         disabled={saving}
-                        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                        className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all ${
                             isDark 
                                 ? 'bg-red-600 hover:bg-red-500 text-white' 
                                 : 'bg-red-600 hover:bg-red-500 text-white'
@@ -383,7 +383,7 @@ const EmailTemplateEditor = ({ templates, onSave, onToast, logoUrl }) => {
             </div>
 
             {/* Editor / Preview */}
-            <div className={`rounded-xl overflow-hidden border ${isDark ? 'border-zinc-700' : 'border-zinc-200'}`}>
+            <div className={`rounded-2xl overflow-hidden border ${isDark ? 'border-zinc-700' : 'border-zinc-200'}`}>
                 {viewMode === 'code' ? (
                     <textarea
                         id="html-editor"

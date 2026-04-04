@@ -11,9 +11,9 @@ const StatsCards = ({ stats }) => {
 
     return (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-            <div className="glass p-6 rounded-xl flex items-center gap-4">
-                <div className="p-3 bg-blue-100 dark:bg-blue-900/30 text-blue-600 rounded-xl">
-                    <FileText size={24} />
+            <div className="glass p-6 rounded-2xl flex items-center gap-4">
+                <div className="text-blue-600 px-1">
+                    <FileText size={36} />
                 </div>
                 <div>
                     <p className="text-sm text-gray-500">Archivos Totales</p>
@@ -21,9 +21,9 @@ const StatsCards = ({ stats }) => {
                 </div>
             </div>
 
-            <div className="glass p-6 rounded-xl flex items-center gap-4">
-                <div className="p-3 bg-green-100 dark:bg-green-900/30 text-green-600 rounded-xl">
-                    <HardDrive size={24} />
+            <div className="glass p-6 rounded-2xl flex items-center gap-4">
+                <div className="text-green-600 px-1">
+                    <HardDrive size={36} />
                 </div>
                 <div>
                     <p className="text-sm text-gray-500">Almacenamiento Usado</p>
@@ -31,9 +31,9 @@ const StatsCards = ({ stats }) => {
                 </div>
             </div>
 
-            <div className="glass p-6 rounded-xl flex items-center gap-4">
-                <div className="p-3 bg-purple-100 dark:bg-purple-900/30 text-purple-600 rounded-xl">
-                    <DownloadCloud size={24} />
+            <div className="glass p-6 rounded-2xl flex items-center gap-4">
+                <div className="text-purple-600 px-1">
+                    <DownloadCloud size={36} />
                 </div>
                 <div>
                     <p className="text-sm text-gray-500">Descargas Totales</p>
