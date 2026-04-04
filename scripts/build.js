@@ -22,7 +22,8 @@ const releaseDir = path.join(rootDir, 'release');
 const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
 const version = pkg.version;
 const timestamp = new Date().toISOString().split('T')[0].replace(/-/g, '');
-const zipFileName = `sendu-v${version}-${timestamp}.zip`;
+const isReleaseMode = process.argv.includes('--release');
+const zipFileName = isReleaseMode ? 'release.zip' : `sendu-v${version}-${timestamp}.zip`;
 
 console.log('🚀 Starting build process...\n');
 console.log(`📦 Version: ${version}`);

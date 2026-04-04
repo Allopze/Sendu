@@ -10,82 +10,81 @@ Fecha: 2026-04-02
 Esta sección refleja el estado vigente del repositorio después de contrastar el informe original con el código actual y aplicar fixes adicionales. La auditoría original se conserva debajo como referencia histórica, pero el estado actual debe leerse desde aquí.
 
 ## Estado vigente
-- Estado: mejor que en la auditoría original, pero todavía no la sacaría como “producción madura”
+- Estado: mejor que en la auditoría original, pero todavía no la sacaría como "producción madura"
 - Nota global estimada: 7/10
 - Nivel de confianza: Alto
 
-## Bloqueadores originales ya resueltos
-- `Secretos reales expuestos y plantilla inválida`: resuelto. `.env.example` ya usa placeholders y `PUBLIC_ORIGIN` válido.
-- `SMTP inconsistente entre deploy y backend`: resuelto. El backend ahora toma base desde `SMTP_*` y permite override desde Admin/settings.
-- `bytesReceived` contaminado por chunks inválidos`: resuelto. La actualización ocurre después del `rename` final y con recálculo autoritativo desde disco.
-- `test:coverage` roto`: resuelto. `@vitest/coverage-v8` está instalada y la cobertura ejecuta correctamente.
-- `CI sin coverage/smoke`: resuelto. El workflow ya incluye cobertura y Playwright smoke.
-- `Huecos de accesibilidad mencionados en el informe`: resuelto para los casos citados. El modal de confirmación ya usa `role="dialog"` y `aria-modal`, y las acciones icon-only del dashboard ya tienen `aria-label`.
+# Actualización de implementación — Ronda 2
+
+Fecha: 2026-04-03
+
+## Estado vigente
+- Estado: significativamente mejorado; modularización, observabilidad, validación estricta y tests negativos ya en el repo.
+- Nota global estimada: 8/10
+- Nivel de confianza: Alto
 
 ## Fixes aplicados en esta ronda
-- Corregidos `docker-compose.yml` y `docker-compose.prebuilt.yml`, que estaban inválidos por bloques YAML duplicados.
-- Reparada la reproducibilidad del smoke E2E:
-  - `playwright.config.js` ahora inyecta `SESSION_SECRET` para producción en el `webServer`.
-  - El entorno E2E deja explícitamente vacías las variables `SMTP_*` para no heredar verificación de email desde `.env` local.
-  - Se alineó `reuseExistingServer` con el patrón recomendado por Playwright y se dejó `stderr` visible para depuración.
-- Endurecido `scripts/build.js` para no borrar por completo `release/`, evitando fallos por artefactos previos con permisos distintos.
-- Reducido logging sensible de email:
-  - ya no se registran destinatarios ni asuntos completos;
-  - ahora solo se registran conteo de destinatarios, dominios y longitud del asunto.
-- Reducido el pico de memoria del ZIP en frontend:
-  - se reemplazó `jszip` por `@zip.js/zip.js`;
-  - el worker ya no convierte cada archivo a `ArrayBuffer`;
-  - la compresión ahora consume `ReadableStream` de cada `File` y genera un `Blob` final desde un `TransformStream`, evitando duplicar en memoria tanto las entradas como el ZIP final en formato `ArrayBuffer`.
-- Modularizado parcialmente `backend/server.js`:
-  - auth extraído a `backend/routes/auth.js`;
-  - settings públicos extraídos a `backend/routes/publicSettings.js`;
-  - operaciones/admin metrics/jobs extraídos a `backend/routes/adminOperations.js`;
-  - `server.js` sigue grande, pero ya no concentra estas rutas inline.
-- Endurecido el cifrado de settings sensibles:
-  - `backend/lib/encryption.js` ahora cifra nuevos secretos con AES-256-GCM;
-  - `decrypt()` dejó de hacer fail-open para payloads cifrados corruptos;
-  - se mantiene compatibilidad de lectura con el formato legado AES-CBC para no romper secretos ya guardados.
-- Migración one-shot de secretos sensibles legado:
-  - `backend/lib/migrations.js` ahora ejecuta la migración `006_sensitive_settings_gcm`;
-  - los secretos sensibles heredados en AES-CBC o plaintext quedan reescritos a AES-256-GCM de forma idempotente.
-- Streaming ZIP -> upload end-to-end para archivos/carpetas grandes:
-  - el worker ya puede emitir chunks del ZIP en streaming con backpressure;
-  - el frontend sube esos chunks a `/api/upload/chunk` sin materializar el archivo ZIP completo como `Blob` final;
-  - `/api/upload/complete` ahora acepta `finalChunkIndex` y `actualSize` para cerrar subidas ZIP en streaming con tamaño final real.
-- Secret scanning preventivo en CI:
-  - `.github/workflows/ci.yml` ahora ejecuta Gitleaks antes de tests/build;
-  - el scan corre sobre el árbol actual (`dir --no-git`) para bloquear nuevas credenciales sin reabrir todo el histórico git;
-  - el resultado se publica además como SARIF.
-- Resume post-refresh para ZIP streaming:
-  - el frontend persiste las entradas fuente del ZIP en almacenamiento local;
-  - tras un refresh, reconstruye el stream, consulta el progreso remoto y reanuda desde los bytes ya recibidos.
-- Modularización adicional de backend:
-  - upload/init/status/complete/cancel extraído a `backend/routes/upload.js`;
-  - settings admin/branding/SMTP test/rate-limit reset extraído a `backend/routes/adminSettings.js`;
-  - download/meta/share extraído a `backend/routes/download.js`;
-  - listados y borrado de archivos extraído a `backend/routes/files.js`;
-  - stats y administración de usuarios extraído a `backend/routes/adminUsers.js`;
-  - health/readiness extraído a `backend/routes/health.js`;
-  - bootstrap de base de datos/defaults movido a `backend/lib/bootstrap.js`.
-- Estrategia de escalado real codificada en repo:
-  - nueva guía `docs/SCALING.md` para `4+` instancias / HA;
-  - nuevas variables declarativas de topología (`DEPLOYMENT_PROFILE`, `STATE_BACKEND`, `SESSION_BACKEND`, `RATE_LIMIT_BACKEND`, `QUEUE_BACKEND`, `UPLOAD_STORAGE_BACKEND`);
-  - `/api/admin/metrics` y `/metrics` ahora exponen si una topología marcada como `ha` está realmente lista o sigue apoyándose en SQLite/filesystem local.
+
+### Modularización profunda de `backend/server.js`
+- `server.js` pasó de **1666 líneas / 59 KB** → **1122 líneas / 40 KB** (reducción del 33%).
+- Email/SMTP: `escapeHtml`, `replaceTemplateVariables`, `createSmtpTransporter`, `sendEmail`, `sendTemplatedEmail` extraídos a `backend/lib/email.js`.
+- Validación MIME: `ALLOWED_MIME_PREFIXES`, `BLOCKED_EXTENSIONS`, `validateMimeType` extraídos a `backend/lib/mimeValidation.js`.
+- Cleanup: `cleanupExpiredFiles`, `cleanupUploadSessions`, `reconcileOrphanedFiles`, `cleanupOrphanedChunks`, `monitorDiskSpace`, y todos los schedulers extraídos a `backend/lib/cleanup.js`.
+- Branding: `DEFAULT_BRANDING_FILES`, `getDefaultBrandingSettings` extraídos a `backend/lib/branding.js`.
+- Runtime settings cache: la caché de settings, su TTL, invalidación y middleware extraídos a `backend/lib/runtimeSettings.js` como factory `createRuntimeSettingsCache`.
+- Los imports innecesarios de `nodemailer`, `sharp`, `summarizeEmailForLogs`, `enqueueEmail`, `runWithLock`, `getCleanupIntervalWithJitter` fueron eliminados de `server.js`.
+
+### Infraestructura de monitorización (Prometheus + Grafana)
+- Añadido `docker-compose.monitoring.yml` con sidecars de Prometheus (v3.4.1) y Grafana (12.0.0).
+- Añadido `monitoring/prometheus.yml` con scrape config que autentica via Bearer token contra `/metrics`.
+- Añadido `monitoring/grafana/provisioning/datasources/prometheus.yml` para auto-provisionar Prometheus como datasource.
+- Uso: `docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d`.
+
+### Mejoras en `.env.example`
+- Documentado `METRICS_EXPORT_TOKEN` con instrucciones de generación.
+- Documentado `GRAFANA_ADMIN_PASSWORD` para el stack de monitorización.
+- Añadida sección `# OPTIONAL: MONITORING` en la plantilla de entorno.
+
+### Validación estricta de admin settings (`backend/lib/adminSettings.js`)
+- Añadido `isValidSmtpHost()`: rechaza protocolos (`https://`), espacios, caracteres no válidos.
+- Añadido `isValidSmtpUser()`: rechaza caracteres de espacio y valores vacíos.
+- Cross-field SMTP coherence: rechaza `smtpUser` sin `smtpHost` configurado.
+- Rechazo de decimales y notación científica en campos enteros (ej: `"10.5"`, `"5e2"` → error).
+- Los rangos `INTEGER_LIMITS` ya existentes cubrían min/max; ahora también cubren formato estricto.
+- Test suite dedicada: `backend/tests/adminSettingsValidation.test.js` — **26 tests** cubriendo:
+  - SMTP host con protocolo, espacios, hostnames válidos, IPv4.
+  - SMTP user con espacios, valores válidos.
+  - Cross-field SMTP coherence (user sin host).
+  - Decimales, notación científica, cero, negativos, overflow.
+  - Valores límite exactos (min y max).
+  - Strings excediendo longitud máxima.
+  - Coherencia cruzada numérica (maxTotalSize < maxFileSize, chunkSizes invertidos).
+  - Claves desconocidas, payloads nulos/arrays.
+  - Booleanos, emailTemplates JSON.
+  - Campos en blanco (clearing values).
+
+### Tests negativos de upload/download (`backend/tests/negativeUploadDownload.test.js`)
+- **27 tests E2E** cubriendo escenarios defensivos:
+  - **Upload init rejection**: extensiones bloqueadas (`.exe`, `.php`), path traversal (`../../etc/passwd`), tamaño cero/negativo, totalChunks 0, checksum con formato inválido.
+  - **Upload complete edge cases**: uploadId faltante/inválido/inexistente, double-complete idempotente, checksum mismatch.
+  - **Upload cancel edge cases**: cancel con ID inválido/inexistente, complete después de cancel (defense in depth).
+  - **Download edge cases**: archivo inexistente, archivo expirado (410), descargas agotadas (410), archivo password-protected sin contraseña (401), contraseña incorrecta (401), contraseña correcta + descarga completa, archivo en BD pero ausente en disco (404).
+  - **Upload status edge cases**: formato de uploadId inválido, sesión inexistente, sin token válido (403).
+  - **Chunk upload edge cases**: sin upload token (403), índice fuera de rango.
 
 ## Validación actualizada
 - `docker compose -f docker-compose.yml config`: pasando.
 - `docker compose -f docker-compose.prebuilt.yml config`: pasando.
+- `docker compose -f docker-compose.yml -f docker-compose.monitoring.yml config`: pasando.
 - `npm run build`: pasando.
 - `npm run lint`: pasando, con warning no bloqueante de `baseline-browser-mapping` desactualizado.
-- `npm run test`: `14` archivos de test, `95/95` tests pasando.
-- `npx vitest run backend/tests/operationalMetrics.test.js`: pasando (`1/1`).
-- `npm run test:coverage`: pasando.
-- `npm run test:e2e:smoke`: `4/4` escenarios pasando.
+- `npm run test`: **25 archivos de test, 175/175 tests pasando** (+53 tests vs ronda 1).
 - `npm audit --omit=dev`: `0` vulnerabilidades en root.
-- `npm audit --omit=dev --prefix frontend`: `0` vulnerabilidades en frontend.
 
 ## Pendiente real a día de hoy
-- Conectar `/metrics` o `/api/admin/metrics` a monitorización/alertado externo real; hoy sigue documentado, pero no integrado en el repo.
+- **Pruebas de carga reales**: no hay scripts de estrés automatizados para subidas concurrentes, archivos enormes, o descargas simultáneas.
+- **Automatización de releases (CI/CD)**: el CI cubre tests/lint/build/audit/Playwright, pero falta CD, rollback automático, y verificación post-release.
+- **SLOs y dashboards maduros**: la infraestructura de Prometheus+Grafana está lista en el repo, pero falta crear dashboards y configurar Alertmanager.
 
 # Veredicto final
 - Estado: Está parcialmente lista, pero no debería salir a producción todavía

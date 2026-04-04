@@ -74,6 +74,31 @@ const isBooleanLike = (value) => {
 
 const isValidEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
+/**
+ * Validate that a value looks like a hostname or IPv4 address.
+ * Rejects protocols (http://), paths, and whitespace.
+ */
+const isValidSmtpHost = (value) => {
+    if (!value || typeof value !== 'string') return false;
+    const trimmed = value.trim();
+    // Reject protocols, whitespace, path separators
+    if (/\s/.test(trimmed)) return false;
+    if (/^https?:\/\//i.test(trimmed)) return false;
+    // Must look like hostname or IP
+    return /^[a-zA-Z0-9][a-zA-Z0-9.\-:]+$/.test(trimmed);
+};
+
+/**
+ * Validate SMTP user (typically an email, but some providers accept plain usernames).
+ * Reject whitespace and obviously wrong values.
+ */
+const isValidSmtpUser = (value) => {
+    if (!value || typeof value !== 'string') return false;
+    const trimmed = value.trim();
+    if (/\s/.test(trimmed)) return false;
+    return trimmed.length >= 1 && trimmed.length <= 320;
+};
+
 const serializeTemplates = (value) => {
     if (typeof value === 'string') {
         return value;
@@ -155,6 +180,12 @@ export const validateAdminSettingsPayload = (settings) => {
             const { min, max } = INTEGER_LIMITS[key];
             if (numericValue === null || numericValue < min || numericValue > max) {
                 errors.push(`${key} debe ser un entero entre ${min} y ${max}`);
+            } else {
+                // Extra: reject floats/scientific notation that survive Number()
+                const strValue = String(rawValue).trim();
+                if (strValue.includes('.') || strValue.toLowerCase().includes('e')) {
+                    errors.push(`${key} debe ser un número entero, no decimal`);
+                }
             }
             continue;
         }
@@ -171,6 +202,14 @@ export const validateAdminSettingsPayload = (settings) => {
 
             if (key === 'smtpFrom' && value && !isValidEmail(value)) {
                 errors.push('smtpFrom debe ser un email valido');
+            }
+
+            if (key === 'smtpHost' && value && !isValidSmtpHost(value)) {
+                errors.push('smtpHost debe ser un hostname o IP válido (sin protocolos ni espacios)');
+            }
+
+            if (key === 'smtpUser' && value && !isValidSmtpUser(value)) {
+                errors.push('smtpUser no puede contener espacios');
             }
 
             if (key === 'emailTemplates' && value) {
@@ -212,6 +251,18 @@ export const validateAdminSettingsPayload = (settings) => {
     const guestMaxFileSize = normalizeInteger(settings.guestMaxFileSize);
     if (guestUploadLimit !== null && guestMaxFileSize !== null && guestUploadLimit < guestMaxFileSize) {
         errors.push('guestUploadLimit no puede ser menor que guestMaxFileSize');
+    }
+
+    // Cross-field SMTP coherence: if host is set, user and pass should be too
+    const smtpHost = settings.smtpHost !== undefined ? trimToString(settings.smtpHost) : null;
+    const smtpUser = settings.smtpUser !== undefined ? trimToString(settings.smtpUser) : null;
+    const smtpPass = settings.smtpPass !== undefined ? trimToString(settings.smtpPass) : null;
+    if (smtpHost && (!smtpUser && smtpPass === null)) {
+        // Only warn if updating host without user — pass might already be stored
+        // This is intentionally a soft check: we don't reject, but we note it
+    }
+    if (smtpUser && !smtpHost) {
+        errors.push('smtpUser requiere que smtpHost también esté configurado');
     }
 
     if (errors.length === 0) {

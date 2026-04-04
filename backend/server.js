@@ -13,9 +13,7 @@ import fs from 'fs';
 import fsPromises from 'fs/promises';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
-import nodemailer from 'nodemailer';
 import multer from 'multer';
-import sharp from 'sharp';
 import checkDiskSpace from 'check-disk-space';
 import { fileTypeFromFile } from 'file-type';
 import { DEFAULT_EMAIL_TEMPLATES } from './templates/email/index.js';
@@ -26,17 +24,15 @@ import { hashToken, generateSecureToken } from './lib/tokenHash.js';
 import { generateFingerprint, getIpFingerprint, canGuestUpload, recordGuestUpload, enablePersistentStorage as enableGuestPersistence } from './lib/guestTracking.js';
 import { initPersistentStores, createSqliteSessionStore, createDownloadToken, validateDownloadToken, createRateLimitStore, resetRateLimits } from './lib/persistentStores.js';
 import { globalErrorHandler, notFoundHandler, asyncHandler, setupProcessErrorHandlers } from './lib/errorHandler.js';
-import { runWithLock, getCleanupIntervalWithJitter } from './lib/cleanupCoordinator.js';
 import { initDatabase, saveDatabase, closeDatabase } from './lib/database.js';
 import { invalidateUploadCache } from './lib/uploadCache.js';
 import { createChunkRouter } from './chunkRouter.js';
-import { initJobQueue, enqueueEmail, enqueueCleanup, enqueueBrandingConversion, getQueueStats, getPendingJobs, retryDeadJobs, cancelJob, stopJobProcessor, JOB_TYPES } from './lib/jobQueue.js';
+import { initJobQueue, enqueueCleanup, enqueueBrandingConversion, getQueueStats, getPendingJobs, retryDeadJobs, cancelJob, stopJobProcessor, JOB_TYPES } from './lib/jobQueue.js';
 import { initJobHandlers } from './lib/jobHandlers.js';
 import { metrics } from './lib/metrics.js';
 import { runMigrations } from './lib/migrations.js';
 import { antivirus } from './lib/antivirus.js';
 import { createUploadSessionToken, validateUploadSessionToken } from './lib/uploadSessionToken.js';
-import { summarizeEmailForLogs } from './lib/emailLog.js';
 import { createSettingsRepository } from './lib/settingsRepository.js';
 import { createUsersRepository } from './lib/usersRepository.js';
 import { createUploadSessionsRepository } from './lib/uploadSessionsRepository.js';
@@ -62,6 +58,11 @@ import {
     mergeSmtpConfig,
     mergeSmtpIntoSettings,
 } from './lib/smtpConfig.js';
+import { createRuntimeSettingsCache } from './lib/runtimeSettings.js';
+import { validateMimeType } from './lib/mimeValidation.js';
+import { getDefaultBrandingSettings } from './lib/branding.js';
+import { createSmtpTransporter, sendEmail as sendEmailDirect, sendTemplatedEmail as sendTemplatedEmailImpl } from './lib/email.js';
+import { cleanupOrphanedChunks, startCleanupSchedulers } from './lib/cleanup.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerPublicSettingsRoutes } from './routes/publicSettings.js';
 import { registerAdminOperationsRoutes } from './routes/adminOperations.js';
@@ -259,101 +260,13 @@ const TEMP_DIR = process.env.APP_TEMP_PATH || path.join(rootDir, 'tmp');
 const MAX_CHUNK_UPLOAD_BYTES = 200 * 1024 * 1024; // Hard limit to match multer and proxy limits
 const MAX_UPLOAD_SESSION_AGE_MS = parseInt(process.env.UPLOAD_SESSION_MAX_AGE_HOURS || '24', 10) * 60 * 60 * 1000;
 
-const RUNTIME_SETTINGS_KEYS = [
-    'largeFileChunkSize',
-    'maxFileSize',
-    'maxTotalSize',
-    'guestUploadLimit',
-    'guestMaxFileSize',
-    'chunkRateLimit',
-    'maxConcurrentUploads',
-    'smtpHost',
-    'smtpPort',
-    'smtpSecure',
-    'smtpUser',
-    'smtpPass',
-    'smtpFrom',
-    'emailTemplates',
-    'logoDarkEmail',
-    'logoDark',
-    'logoLightEmail',
-    'logoLight'
-];
-const RUNTIME_SETTINGS_REFRESH_TTL_MS = isTest ? 0 : 30000;
-let runtimeSettingsCache = {
-    values: new Map(),
-    refreshedAt: 0,
-    dirty: true,
-    refreshPromise: null,
-};
-
-const resetRuntimeSettingsCache = () => {
-    runtimeSettingsCache = {
-        values: new Map(),
-        refreshedAt: 0,
-        dirty: true,
-        refreshPromise: null,
-    };
-};
-
-const markRuntimeSettingsCacheStale = () => {
-    runtimeSettingsCache.dirty = true;
-    runtimeSettingsCache.refreshedAt = 0;
-};
-
-const getRuntimeSettingValue = (key, defaultValue = null) => {
-    if (!runtimeSettingsCache.values.has(key)) {
-        return defaultValue;
-    }
-
-    return runtimeSettingsCache.values.get(key);
-};
-
-const refreshRuntimeSettingsCache = async ({ force = false } = {}) => {
-    if (!db) {
-        return runtimeSettingsCache.values;
-    }
-
-    const now = Date.now();
-    if (!force && !runtimeSettingsCache.dirty && (now - runtimeSettingsCache.refreshedAt) < RUNTIME_SETTINGS_REFRESH_TTL_MS) {
-        return runtimeSettingsCache.values;
-    }
-
-    if (runtimeSettingsCache.refreshPromise) {
-        return runtimeSettingsCache.refreshPromise;
-    }
-
-    runtimeSettingsCache.refreshPromise = (async () => {
-        const rows = await getSettingsRepository().listByKeys(RUNTIME_SETTINGS_KEYS);
-        const nextValues = new Map();
-
-        rows.forEach((row) => {
-            nextValues.set(row.key, row.value);
-        });
-
-        runtimeSettingsCache.values = nextValues;
-        runtimeSettingsCache.refreshedAt = Date.now();
-        runtimeSettingsCache.dirty = false;
-        return runtimeSettingsCache.values;
-    })()
-        .catch((err) => {
-            logger.warn('Runtime settings cache refresh failed', { error: err.message });
-            throw err;
-        })
-        .finally(() => {
-            runtimeSettingsCache.refreshPromise = null;
-        });
-
-    return runtimeSettingsCache.refreshPromise;
-};
-
-const ensureRuntimeSettingsLoaded = async (req, res, next) => {
-    try {
-        await refreshRuntimeSettingsCache();
-    } catch {}
-
-    next();
-};
+// Runtime settings cache (extracted module)
+const settingsCache = createRuntimeSettingsCache({ getSettingsRepository, isTest });
+const getRuntimeSettingValue = settingsCache.getValue;
+const refreshRuntimeSettingsCache = settingsCache.refresh;
+const resetRuntimeSettingsCache = settingsCache.reset;
+const ensureRuntimeSettingsLoaded = settingsCache.ensureLoaded;
+const invalidateSettingsCache = () => settingsCache.invalidate();
 
 // Ensure directories exist
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -361,18 +274,11 @@ if (!fs.existsSync(CHUNKS_DIR)) fs.mkdirSync(CHUNKS_DIR, { recursive: true });
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 // Helper: Get max chunk size from settings (for validation)
-// Needs to be defined before chunk router
 const getMaxChunkSizeFromSettingsSync = () => {
     const configuredChunkSize = parseInt(getRuntimeSettingValue('largeFileChunkSize'), 10);
     const largeChunk = Number.isFinite(configuredChunkSize) ? configuredChunkSize : 100;
     const computed = Math.max(largeChunk * 1.2, 200) * 1024 * 1024;
     return Math.min(computed, MAX_CHUNK_UPLOAD_BYTES);
-};
-
-// Invalidate cache when settings are updated
-const invalidateSettingsCache = (keys = null) => {
-    markRuntimeSettingsCacheStale();
-    refreshRuntimeSettingsCache({ force: true }).catch(() => {});
 };
 
 // Helper: Get upload limits from settings (used by chunk router)
@@ -688,35 +594,12 @@ if (process.env.NODE_ENV === 'production') {
 const BRANDING_DIR = path.join(rootDir, 'branding');
 if (!fs.existsSync(BRANDING_DIR)) fs.mkdirSync(BRANDING_DIR, { recursive: true });
 app.use('/branding', express.static(BRANDING_DIR, {
-    maxAge: '1d', // Cache for 1 day
+    maxAge: '1d',
     etag: true,
-    lastModified: true
+    lastModified: true,
 }));
 
-const DEFAULT_BRANDING_FILES = {
-    logoLight: 'logoLight.svg',
-    logoDark: 'logoDark.svg',
-    favicon: 'favicon.png',
-    dropzoneIcon: 'dropzoneIcon.svg'
-};
-
-const getDefaultBrandingSettings = () => {
-    const defaults = {
-        logoLight: '',
-        logoDark: '',
-        favicon: '',
-        dropzoneIcon: ''
-    };
-
-    for (const [key, fileName] of Object.entries(DEFAULT_BRANDING_FILES)) {
-        const filePath = path.join(BRANDING_DIR, fileName);
-        if (fs.existsSync(filePath)) {
-            defaults[key] = `/branding/${fileName}`;
-        }
-    }
-
-    return defaults;
-};
+const getDefaultBrandingSettingsBound = () => getDefaultBrandingSettings(BRANDING_DIR);
 
 // Helper: Get SMTP config from settings (with decryption for sensitive fields)
 const getSmtpConfig = () => {
@@ -729,11 +612,8 @@ const getSmtpConfig = () => {
     const sensitiveKeys = ['smtpPass'];
     Object.keys(SMTP_ENV_KEY_MAP).forEach((key) => {
         const value = getRuntimeSettingValue(key);
-        if (!value) {
-            return;
-        }
+        if (!value) return;
 
-        // Decrypt sensitive values
         if (sensitiveKeys.includes(key) && isEncrypted(value)) {
             try {
                 storedConfig[key] = decrypt(value);
@@ -741,7 +621,7 @@ const getSmtpConfig = () => {
                 logger.warn('Sensitive setting decryption failed; ignoring stored value', {
                     key,
                     format: getEncryptionFormat(value),
-                    error: err.message
+                    error: err.message,
                 });
                 storedConfig[key] = '';
             }
@@ -758,13 +638,12 @@ const isEmailDeliveryEnabled = () => {
     return Boolean(config.smtpHost && config.smtpUser && config.smtpPass);
 };
 
-// Helper: Get email templates from settings (with fallback to defaults)
+// Email templates from settings (with fallback to defaults)
 const getEmailTemplates = () => {
     const serializedTemplates = getRuntimeSettingValue('emailTemplates');
     if (serializedTemplates) {
         try {
             const savedTemplates = JSON.parse(serializedTemplates);
-            // Merge with defaults (saved templates take priority)
             return { ...DEFAULT_EMAIL_TEMPLATES, ...savedTemplates };
         } catch (e) {
             return DEFAULT_EMAIL_TEMPLATES;
@@ -773,186 +652,24 @@ const getEmailTemplates = () => {
     return DEFAULT_EMAIL_TEMPLATES;
 };
 
-// HTML-escape helper to prevent XSS in email templates
-const escapeHtml = (str) => {
-    if (!str || typeof str !== 'string') return str || '';
-    return str
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-};
+// Thin wrappers that pass runtime-resolved config to the extracted email module
+const sendEmail = (to, subject, text, html = null) =>
+    sendEmailDirect(to, subject, text, html, getSmtpConfig());
 
-// Helper: Replace variables in template
-const replaceTemplateVariables = (template, variables) => {
-    let result = template;
+const createSmtpTransporterBound = () => createSmtpTransporter(getSmtpConfig());
 
-    // Handle {{#if variable}}...{{else}}...{{/if}} blocks
-    result = result.replace(/\{\{#if\s+(\w+)\}\}([\s\S]*?)\{\{else\}\}([\s\S]*?)\{\{\/if\}\}/g,
-        (match, varName, ifContent, elseContent) => {
-            return variables[varName] ? ifContent : elseContent;
-        }
-    );
-
-    // Handle {{#if variable}}...{{/if}} blocks (without else)
-    result = result.replace(/\{\{#if\s+(\w+)\}\}([\s\S]*?)\{\{\/if\}\}/g,
-        (match, varName, ifContent) => {
-            return variables[varName] ? ifContent : '';
-        }
-    );
-
-    // Variables that should NOT be escaped (contain trusted HTML/URLs)
-    const rawVariables = new Set(['verificationLink', 'resetLink', 'downloadLink', 'logoUrl', 'appUrl']);
-
-    // Replace simple variables (HTML-escaped unless in rawVariables set)
-    Object.entries(variables).forEach(([key, value]) => {
-        const regex = new RegExp(`{{${key}}}`, 'g');
-        const safeValue = rawVariables.has(key) ? (value || '') : escapeHtml(value);
-        result = result.replace(regex, safeValue);
-    });
-    return result;
-};
-
-// Helper: Create nodemailer transporter
-const createSmtpTransporter = () => {
-    const config = getSmtpConfig();
-    if (!isEmailDeliveryEnabled()) {
-        return null;
-    }
-
-    const port = parseInt(config.smtpPort) || 587;
-    const explicitSecure = typeof config.smtpSecure === 'string'
-        ? config.smtpSecure.trim().toLowerCase()
-        : '';
-    // Puerto 465 usa SSL directo (secure: true)
-    // Puerto 587 usa STARTTLS (secure: false, pero TLS se negocia)
-    const secure = explicitSecure
-        ? explicitSecure === 'true'
-        : port === 465;
-
-    return nodemailer.createTransport({
-        host: config.smtpHost,
-        port: port,
-        secure: secure, // true para 465, false para 587/25
-        auth: {
-            user: config.smtpUser,
-            pass: config.smtpPass
-        },
-        // Para puerto 587, forzar uso de TLS via STARTTLS
-        ...(port === 587 && { requireTLS: true })
-    });
-};
-
-// Helper: Send Email with template support
-const sendEmail = async (to, subject, text, html = null) => {
-    const config = getSmtpConfig();
-    const transporter = createSmtpTransporter();
-
-    if (!transporter) {
-        logger.info('Email sent (mock mode)', summarizeEmailForLogs({ to, subject }));
-        return { success: true, mock: true };
-    }
-
-    const mailOptions = {
-        from: config.smtpFrom || config.smtpUser,
+const sendTemplatedEmail = (to, templateName, variables = {}, options = {}) =>
+    sendTemplatedEmailImpl({
         to,
-        subject,
-        text,
-        ...(html && { html })
-    };
-
-    return transporter.sendMail(mailOptions);
-};
-
-// Helper: Send templated email (uses job queue for reliability)
-const sendTemplatedEmail = async (to, templateName, variables = {}, options = {}) => {
-    const templates = getEmailTemplates();
-    const config = getSmtpConfig();
-    const smtpConfigured = isEmailDeliveryEnabled();
-
-    // Helper to ensure absolute URL
-    const ensureAbsoluteUrl = (url) => {
-        if (!url) return null;
-        if (url.startsWith('http://') || url.startsWith('https://')) {
-            return url.split('?')[0]; // Remove cache busting
-        }
-        // Make relative URL absolute
-        return `${PUBLIC_ORIGIN}${url.startsWith('/') ? '' : '/'}${url.split('?')[0]}`;
-    };
-
-    // Get logo URL from branding settings - use dark theme for emails (dark header background)
-    // Prefer PNG version for emails (better compatibility with email clients)
-    const logoDarkEmailSetting = getRuntimeSettingValue('logoDarkEmail', '');
-    const logoDarkSetting = getRuntimeSettingValue('logoDark', '');
-    const logoLightEmailSetting = getRuntimeSettingValue('logoLightEmail', '');
-    const logoLightSetting = getRuntimeSettingValue('logoLight', '');
-
-    let logoUrl;
-    // Priority: logoDarkEmail > logoDark > logoLightEmail > logoLight > default
-    if (logoDarkEmailSetting) {
-        logoUrl = ensureAbsoluteUrl(logoDarkEmailSetting);
-    } else if (logoDarkSetting) {
-        logoUrl = ensureAbsoluteUrl(logoDarkSetting);
-    } else if (logoLightEmailSetting) {
-        logoUrl = ensureAbsoluteUrl(logoLightEmailSetting);
-    } else if (logoLightSetting) {
-        logoUrl = ensureAbsoluteUrl(logoLightSetting);
-    } else {
-        // No logo configured, use empty string so alt text shows
-        logoUrl = '';
-    }
-
-    // Default app variables
-    const appVars = {
-        appName: 'Sendu',
-        appUrl: PUBLIC_ORIGIN,
-        logoUrl,
-        ...variables
-    };
-
-    let subject, html;
-
-    if (!templates || !templates[templateName]) {
-        // Fallback to simple text email
-        subject = replaceTemplateVariables(variables.subject || 'Notificación', appVars);
-        html = `<p>${replaceTemplateVariables(variables.text || '', appVars)}</p>`;
-    } else {
-        const template = templates[templateName];
-        subject = replaceTemplateVariables(template.subject, appVars);
-        html = replaceTemplateVariables(template.html, appVars);
-    }
-
-    // If SMTP is not configured, skip queueing to avoid noisy job failures
-    if (!smtpConfigured) {
-        logger.warn('SMTP not configured, skipping email queue', summarizeEmailForLogs({
-            to,
-            subject,
-            templateName
-        }));
-        return { queued: false, mock: true };
-    }
-
-    // Use job queue for async email sending (more reliable, with retries)
-    if (options.sync) {
-        // For testing or when immediate feedback is needed
-        return sendEmail(to, subject, html.replace(/<[^>]*>/g, ''), html);
-    }
-
-    // Queue the email for background processing
-    const jobId = await enqueueEmail(to, subject, html, {
-        from: config.smtpFrom || config.smtpUser,
-        priority: options.priority,
-    });
-
-    logger.debug('Email queued', summarizeEmailForLogs({
-        to,
-        subject,
         templateName,
-        jobId
-    }));
-    return { queued: true, jobId };
-};
+        variables,
+        templates: getEmailTemplates(),
+        smtpConfig: getSmtpConfig(),
+        smtpConfigured: isEmailDeliveryEnabled(),
+        publicOrigin: PUBLIC_ORIGIN,
+        getRuntimeSettingValue,
+        options,
+    });
 
 // Auth Middleware
 const requireAuth = (req, res, next) => {
@@ -1015,78 +732,7 @@ const getMaxConcurrentUploads = () => {
     return Number.isFinite(configuredValue) ? Math.max(1, configuredValue) : 6;
 };
 
-// MIME type validation - allowlist for common safe file types
-// Extensible via admin settings in future
-const ALLOWED_MIME_PREFIXES = [
-    'image/',           // All image types
-    'video/',           // All video types
-    'audio/',           // All audio types
-    'text/',            // Text files
-    'application/pdf',  // PDFs
-    'application/zip',  // Archives
-    'application/x-zip-compressed',
-    'application/x-rar-compressed',
-    'application/x-7z-compressed',
-    'application/x-tar',
-    'application/x-gtar',
-    'application/x-gzip',
-    'application/x-compressed',     // .tgz, .tar.gz
-    'application/x-bzip',
-    'application/x-bzip2',
-    'application/x-xz',
-    'application/x-lzip',
-    'application/x-lzma',
-    'application/x-lz4',
-    'application/x-zstd',
-    'application/gzip',
-    'application/json',
-    'application/xml',
-    'application/javascript',
-    // application/octet-stream removed — too permissive (bypasses allowlist)
-    'application/vnd.openxmlformats-officedocument', // Office docs
-    'application/vnd.ms-',      // MS Office
-    'application/msword',
-    'application/vnd.oasis.opendocument', // LibreOffice
-];
-
-// Blocked extensions (dangerous executables)
-const BLOCKED_EXTENSIONS = [
-    '.exe', '.dll', '.bat', '.cmd', '.com', '.msi', '.scr',
-    '.ps1', '.psm1', '.psd1', // PowerShell
-    '.vbs', '.vbe', '.js', '.jse', '.ws', '.wsf', '.wsc', '.wsh', // Windows scripting
-    '.hta', '.cpl', '.msc', '.inf', '.reg', // Windows system
-    '.sh', '.bash', '.zsh', // Unix scripts
-    '.php', '.phtml', '.php3', '.php4', '.php5', '.phps', // PHP
-    '.asp', '.aspx', '.cer', '.csr', '.jsp', '.jspx', // Server scripts
-];
-
-const validateMimeType = (mimeType, filename) => {
-    // Check blocked extensions first
-    const ext = path.extname(filename || '').toLowerCase();
-    if (BLOCKED_EXTENSIONS.includes(ext)) {
-        return { valid: false, reason: `Tipo de archivo no permitido: ${ext}` };
-    }
-
-    // Check MIME type against allowlist
-    if (!mimeType) {
-        return { valid: true }; // Allow if no MIME type (will be treated as octet-stream)
-    }
-
-    const normalizedMime = mimeType.toLowerCase();
-
-    // Allow octet-stream only when file extension is not blocked (secondary check)
-    if (normalizedMime === 'application/octet-stream') {
-        return { valid: true };
-    }
-
-    const isAllowed = ALLOWED_MIME_PREFIXES.some(prefix => normalizedMime.startsWith(prefix));
-
-    if (!isAllowed) {
-        return { valid: false, reason: `Tipo MIME no permitido: ${mimeType}` };
-    }
-
-    return { valid: true };
-};
+// MIME validation is now in lib/mimeValidation.js (imported at top)
 
 // NOTE: Chunk size validation is handled by the optimized chunkRouter
 // The following multer and error handler are used only for branding uploads
@@ -1262,7 +908,7 @@ registerAdminSettingsRoutes({
     fsPromises,
     handleMulterError,
     isEmailDeliveryEnabled,
-    createSmtpTransporter,
+    createSmtpTransporter: createSmtpTransporterBound,
     sendEmail,
 });
 
@@ -1272,7 +918,7 @@ registerPublicSettingsRoutes({
     app,
     asyncHandler,
     getSettingsRepository,
-    getDefaultBrandingSettings,
+    getDefaultBrandingSettings: getDefaultBrandingSettingsBound,
     isEmailDeliveryEnabled,
     getMaxChunkSizeFromSettingsSync,
     generateFingerprint,
@@ -1325,136 +971,8 @@ if (process.env.NODE_ENV === 'production') {
     });
 }
 
-// Automatic cleanup job - runs every hour with distributed locking
-const cleanupExpiredFiles = async () => {
-    const now = Date.now();
-
-    const uniqueFiles = await getFilesRepository().listCleanupCandidates(now);
-
-    if (uniqueFiles.length === 0) return;
-
-    logger.info(`Cleanup: Found ${uniqueFiles.length} expired files to delete`);
-
-    for (const file of uniqueFiles) {
-        try {
-            try {
-                await fsPromises.unlink(file.serverPath);
-            } catch (err) {
-                if (err.code !== 'ENOENT') {
-                    logger.warn('Cleanup: File not found on disk', { fileId: file.id });
-                }
-            }
-            await getFilesRepository().deleteById(file.id);
-            logger.info(`Cleanup: Deleted file ${file.id} (${file.originalName})`);
-        } catch (err) {
-            logger.error('Cleanup error', { fileId: file.id, error: err.message });
-        }
-    }
-};
-
-// Cleanup old upload sessions to prevent table growth
-const cleanupUploadSessions = async () => {
-    const cutoff = Date.now() - (7 * 24 * 60 * 60 * 1000); // 7 days
-    try {
-        await getUploadSessionsRepository().deleteFinishedBefore(cutoff);
-    } catch (err) {
-        logger.warn('Cleanup upload sessions failed', { error: err.message });
-    }
-};
-
-// Reconcile orphaned files between DB and disk
-const reconcileOrphanedFiles = async () => {
-    try {
-        const dbFiles = await getFilesRepository().listStorageEntries();
-        const dbPathSet = new Set(dbFiles.map(f => f.serverPath));
-
-        const entries = await fsPromises.readdir(UPLOAD_DIR, { withFileTypes: true });
-        for (const entry of entries) {
-            if (entry.isDirectory()) continue;
-            const filePath = path.join(UPLOAD_DIR, entry.name);
-            if (!dbPathSet.has(filePath)) {
-                try {
-                    await fsPromises.unlink(filePath);
-                    logger.info('Reconcile: deleted orphaned file', { file: entry.name });
-                } catch (err) {
-                    logger.warn('Reconcile: failed to delete orphaned file', { file: entry.name, error: err.message });
-                }
-            }
-        }
-
-        for (const file of dbFiles) {
-            if (!fs.existsSync(file.serverPath)) {
-                await getFilesRepository().deleteById(file.id);
-                logger.warn('Reconcile: removed DB entry for missing file', { fileId: file.id });
-            }
-        }
-    } catch (err) {
-        logger.error('Reconcile orphaned files failed', { error: err.message });
-    }
-};
-
-// Cleanup orphaned chunks (uploads that were never completed)
-// Only deletes chunks that haven't been modified for maxAgeMs (safe for slow uploads)
-const cleanupOrphanedChunks = async (maxAgeMs = 24 * 60 * 60 * 1000) => {
-    const now = Date.now();
-    let deletedCount = 0;
-    let freedBytes = 0;
-
-    // Ensure chunks directory exists
-    if (!fs.existsSync(CHUNKS_DIR)) {
-        fs.mkdirSync(CHUNKS_DIR, { recursive: true });
-        return { deletedCount: 0, freedBytes: 0 };
-    }
-
-    try {
-        const chunkDirs = await fsPromises.readdir(CHUNKS_DIR);
-
-        for (const dir of chunkDirs) {
-            const chunkPath = path.join(CHUNKS_DIR, dir);
-
-            try {
-                const stat = await fsPromises.stat(chunkPath);
-                if (!stat.isDirectory()) continue;
-
-                // Find the most recent modification time among all files in the folder
-                // This ensures we don't delete active uploads (slow connections)
-                let lastActivity = stat.mtimeMs;
-
-                const files = await fsPromises.readdir(chunkPath);
-                for (const file of files) {
-                    try {
-                        const fileStat = await fsPromises.stat(path.join(chunkPath, file));
-                        if (fileStat.mtimeMs > lastActivity) {
-                            lastActivity = fileStat.mtimeMs;
-                        }
-                    } catch { }
-                }
-
-                // Only delete if NO activity for maxAge (safe for slow uploads)
-                const timeSinceLastActivity = now - lastActivity;
-                if (timeSinceLastActivity > maxAgeMs) {
-                    // Calculate size before deleting
-                    for (const file of files) {
-                        try {
-                            const fileStat = await fsPromises.stat(path.join(chunkPath, file));
-                            freedBytes += fileStat.size;
-                        } catch { }
-                    }
-
-                    await fsPromises.rm(chunkPath, { recursive: true, force: true });
-                    deletedCount++;
-                    logger.info(`Cleanup: Deleted orphaned chunk folder ${dir} (inactive for ${Math.round(timeSinceLastActivity / 60000)} minutes)`);
-                }
-            } catch (err) {
-                logger.warn('Error processing chunk folder', { dir, error: err.message });
-            }
-        }
-    } catch (err) {
-        logger.error('Error reading chunks directory', { error: err.message });
-    }
-
-    return { deletedCount, freedBytes };
-};
+// Cleanup functions are now in lib/cleanup.js
+const cleanupOrphanedChunksBound = (maxAgeMs) => cleanupOrphanedChunks(CHUNKS_DIR, maxAgeMs);
 
 registerAdminOperationsRoutes({
     app,
@@ -1463,7 +981,7 @@ registerAdminOperationsRoutes({
     enqueueCleanup,
     CHUNKS_DIR,
     UPLOAD_DIR,
-    cleanupOrphanedChunks,
+    cleanupOrphanedChunks: cleanupOrphanedChunksBound,
     logger,
     getQueueStats,
     getPendingJobs,
@@ -1487,69 +1005,6 @@ app.use(notFoundHandler);
 
 // Global error handler (must be last)
 app.use(globalErrorHandler);
-
-// Cleanup with distributed locking (safe for multi-replica)
-const runCleanup = async () => {
-    if (!db) return; // Skip if database not initialized yet
-    const ran = await runWithLock(async () => {
-        await cleanupExpiredFiles();
-        await cleanupUploadSessions();
-        await reconcileOrphanedFiles();
-    });
-    if (ran) {
-        logger.debug('Cleanup completed successfully');
-    }
-};
-
-// Run cleanup with jitter to prevent thundering herd in multi-replica deployments
-const CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour base
-const scheduleNextCleanup = () => {
-    const interval = getCleanupIntervalWithJitter(CLEANUP_INTERVAL);
-    setTimeout(async () => {
-        await runCleanup();
-        scheduleNextCleanup();
-    }, interval);
-};
-
-// Orphaned chunk cleanup schedule
-const CHUNK_CLEANUP_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours base
-const CHUNK_CLEANUP_MAX_AGE_HOURS = parseInt(process.env.CHUNK_CLEANUP_MAX_AGE_HOURS || '24', 10);
-const runChunkCleanup = async () => {
-    if (!db) return;
-    const maxAgeMs = Math.max(1, Math.min(720, CHUNK_CLEANUP_MAX_AGE_HOURS)) * 60 * 60 * 1000;
-    const ran = await runWithLock(async () => {
-        await cleanupOrphanedChunks(maxAgeMs);
-    });
-    if (ran) {
-        logger.debug('Chunk cleanup completed successfully');
-    }
-};
-
-const scheduleNextChunkCleanup = () => {
-    const interval = getCleanupIntervalWithJitter(CHUNK_CLEANUP_INTERVAL);
-    setTimeout(async () => {
-        await runChunkCleanup();
-        scheduleNextChunkCleanup();
-    }, interval);
-};
-
-// Disk space monitor (logs warnings for low disk)
-const DISK_WARN_PERCENT = parseInt(process.env.DISK_WARN_PERCENT || '10', 10);
-const DISK_WARN_GB = parseInt(process.env.DISK_WARN_GB || '5', 10);
-const DISK_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
-const monitorDiskSpace = async () => {
-    try {
-        const { free, size } = await checkDiskSpace(UPLOAD_DIR);
-        const freePercent = size > 0 ? Math.round((free / size) * 100) : 0;
-        const freeGb = Math.round(free / (1024 * 1024 * 1024));
-        if (freePercent <= DISK_WARN_PERCENT || freeGb <= DISK_WARN_GB) {
-            metrics.increment('disk_low', 1);
-            logger.warn('Low disk space detected', { freePercent, freeGb, path: UPLOAD_DIR });
-        }
-    } catch (err) {
-        logger.warn('Disk space monitor failed', { error: err.message });
-    }
-};
 
 // Main startup function
 const startServer = async (options = {}) => {
@@ -1592,7 +1047,7 @@ const startServer = async (options = {}) => {
         });
         await seedDefaultBrandingSettings({
             getSettingsRepository,
-            getDefaultBrandingSettings,
+            getDefaultBrandingSettings: getDefaultBrandingSettingsBound,
         });
         await refreshRuntimeSettingsCache({ force: true });
 
@@ -1623,14 +1078,16 @@ const startServer = async (options = {}) => {
         });
 
         if (enableSchedulers) {
-            // Run cleanup on startup and schedule next
-            runCleanup();
-            scheduleNextCleanup();
-            runChunkCleanup();
-            scheduleNextChunkCleanup();
-            // Start disk monitoring
-            monitorDiskSpace();
-            setInterval(monitorDiskSpace, DISK_CHECK_INTERVAL);
+            startCleanupSchedulers({
+                db,
+                getFilesRepository,
+                getUploadSessionsRepository,
+                UPLOAD_DIR,
+                CHUNKS_DIR,
+                CHUNK_CLEANUP_MAX_AGE_HOURS: parseInt(process.env.CHUNK_CLEANUP_MAX_AGE_HOURS || '24', 10),
+                DISK_WARN_PERCENT: parseInt(process.env.DISK_WARN_PERCENT || '10', 10),
+                DISK_WARN_GB: parseInt(process.env.DISK_WARN_GB || '5', 10),
+            });
         }
 
         if (listen) {

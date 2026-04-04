@@ -9,6 +9,7 @@
     "dev:frontend": "cd frontend && npm run dev",
     "cleanup": "node scripts/cleanup.js",
     "build": "node scripts/build.js",
+    "release": "node scripts/build.js --release",
     "backup": "node scripts/backup.js",
     "restore": "node scripts/restore.js",
     "cutover:postgres:export": "node scripts/postgres-cutover.js export",

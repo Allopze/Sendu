@@ -1,0 +1,31 @@
+# Prometheus scrape configuration for Sendu
+#
+# The /metrics endpoint requires authentication via METRICS_EXPORT_TOKEN.
+# Set the token value below to match your .env file.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'sendu'
+    metrics_path: '/metrics'
+    scheme: http
+
+    # Authenticate using the Bearer token
+    authorization:
+      type: Bearer
+      credentials: '${METRICS_EXPORT_TOKEN}'
+
+    static_configs:
+      - targets: ['sendu:${PORT:-3000}']
+        labels:
+          instance: 'sendu-app'
+          environment: 'production'
+
+    # Relabel to add useful metadata
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'sendu_(.+)'
+        target_label: __name__
+        replacement: 'sendu_$1'

@@ -334,7 +334,7 @@ const HomePage = () => {
                 src={brandingSettings.dropzoneIcon} 
                 alt="" 
                 className={className}
-                style={{ width: size, height: size, objectFit: 'contain' }}
+                style={{ width: size, maxHeight: size, objectFit: 'contain' }}
                 onError={() => setImgError(true)}
             />
         );
@@ -418,11 +418,11 @@ const HomePage = () => {
                     // Drop Zone vacío
                     <>
                         {brandingSettings.dropzoneIcon && (
-                            <div className={`absolute top-[10%] transition-transform duration-500 animate-float ${isDragging ? 'scale-110' : ''}`}>
-                                <DropzoneIcon size={250} />
+                            <div className={`flex-shrink transition-transform duration-500 animate-float ${isDragging ? 'scale-110' : ''}`} style={{ minHeight: 0 }}>
+                                <DropzoneIcon size={250} className="max-h-[30vh]" />
                             </div>
                         )}
-                        <div className={brandingSettings.dropzoneIcon ? "absolute bottom-[25%] text-center" : "text-center"}>
+                        <div className="text-center mt-auto flex-shrink-0">
                             <h2 className={`text-xl font-semibold mb-2 ${isDark ? 'text-white' : 'text-zinc-800'}`}>
                                 Arrastra archivos o carpetas aquí
                             </h2>

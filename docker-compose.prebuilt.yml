@@ -44,8 +44,8 @@ services:
     cpus: "1.0"
     read_only: true
     tmpfs:
-      - /tmp:size=64m
-      - /app/tmp:size=256m
+      - /tmp:size=64m,uid=1001,gid=1001
+      - /app/tmp:size=256m,uid=1001,gid=1001
 
 volumes:
   sendu-data:

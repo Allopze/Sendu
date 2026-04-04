@@ -1,0 +1,51 @@
+# docker-compose.monitoring.yml
+#
+# Adds Prometheus + Grafana sidecars to a running Sendu deployment.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+#
+# Requirements:
+#   - Set METRICS_EXPORT_TOKEN in your .env so Prometheus can authenticate.
+#   - The main sendu service must be defined in docker-compose.yml.
+#
+# Access:
+#   - Prometheus UI: http://localhost:9090
+#   - Grafana UI:    http://localhost:3001  (default admin/admin)
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.4.1
+    container_name: sendu-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      sendu:
+        condition: service_healthy
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+
+  grafana:
+    image: grafana/grafana:12.0.0
+    container_name: sendu-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:
