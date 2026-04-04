@@ -34,6 +34,50 @@ export const createChunkRouter = (options) => {
     
     const router = express.Router();
     const uploadSessionsRepository = () => getUploadSessionsRepository();
+
+    const cleanupUploadArtifacts = async (uploadPath, tempFilePath = null) => {
+        if (tempFilePath) {
+            try {
+                await fsPromises.unlink(tempFilePath);
+            } catch {}
+        }
+
+        if (uploadPath) {
+            try {
+                await fsPromises.rm(uploadPath, { recursive: true, force: true });
+            } catch {}
+        }
+    };
+
+    const resolveAuthorizedSession = async ({ uploadId, token }) => {
+        const session = await uploadSessionsRepository().findByUploadId(uploadId);
+        if (!session) {
+            return { status: 404, error: 'Sesión de subida no encontrada' };
+        }
+
+        if (!validateUploadSessionToken({
+            uploadId,
+            token,
+            userId: session.userId || null,
+            ipFingerprint: session.ipFingerprint || null,
+        })) {
+            return { status: 403, error: 'No autorizado para esta sesión de subida' };
+        }
+
+        if (session.status === 'cancelled') {
+            return { status: 409, error: 'Sesión de subida cancelada', session };
+        }
+
+        if (session.status === 'completed') {
+            return { status: 409, error: 'Sesión de subida no disponible', session };
+        }
+
+        if (Date.now() - session.createdAt > maxUploadAgeMs) {
+            return { status: 410, error: 'Sesión de subida expirada', session };
+        }
+
+        return { session };
+    };
     
     // Multer configurado para chunks
     const storage = multer.diskStorage({
@@ -75,6 +119,9 @@ export const createChunkRouter = (options) => {
             return res.status(400).json({ error: `Error de subida: ${err.message}` });
         }
         if (err) {
+            if (req.file?.path) {
+                fsPromises.unlink(req.file.path).catch(() => {});
+            }
             return res.status(500).json({ error: 'Error interno durante la subida' });
         }
         next();
@@ -137,10 +184,29 @@ export const createChunkRouter = (options) => {
         next();
     };
 
+    const validateChunkSession = async (req, res, next) => {
+        const { uploadId } = req.query;
+        const uploadToken = req.get('x-upload-token') || req.query.uploadToken;
+        const uploadPath = path.join(CHUNKS_DIR, uploadId);
+        const resolved = await resolveAuthorizedSession({ uploadId, token: uploadToken });
+
+        if (resolved.session) {
+            req.uploadSession = resolved.session;
+            return next();
+        }
+
+        if (resolved.status === 409 && resolved.error === 'Sesión de subida cancelada') {
+            await cleanupUploadArtifacts(uploadPath);
+        }
+
+        return res.status(resolved.status).json({ error: resolved.error });
+    };
+
     // Ruta POST /chunk (sin prefijo, se monta en /api/upload/chunk)
-    router.post('/', preflight, upload.single('chunk'), handleMulterError, async (req, res) => {
+    router.post('/', preflight, validateChunkSession, upload.single('chunk'), handleMulterError, async (req, res) => {
         const { uploadId, index } = req.query;
         const startTime = Date.now();
+        const uploadPath = path.join(CHUNKS_DIR, uploadId);
         
         // Validación rápida sin logging
         if (!req.file) {
@@ -164,7 +230,6 @@ export const createChunkRouter = (options) => {
         try {
             // Obtener meta (cacheado)
             const { meta, maxChunkSize } = await getUploadMeta(uploadId);
-            const uploadPath = path.join(CHUNKS_DIR, uploadId);
             const tempChunkPath = req.file.path;
             const finalChunkPath = path.join(uploadPath, req.chunkFinalName || `${chunkIndex}.part`);
 
@@ -188,33 +253,18 @@ export const createChunkRouter = (options) => {
             const projectedBytes = authoritativeBytesBefore + delta;
 
             // Validate upload session state (repository-backed)
-            const session = await uploadSessionsRepository().findByUploadId(uploadId);
-            if (!session) {
-                try { await fsPromises.unlink(req.file.path); } catch {}
-                metrics.increment('upload_chunk_client_error', 1);
-                return res.status(404).json({ error: 'Sesión de subida no encontrada' });
-            }
             const uploadToken = req.get('x-upload-token') || req.query.uploadToken;
-            if (!validateUploadSessionToken({
-                uploadId,
-                token: uploadToken,
-                userId: session.userId || null,
-                ipFingerprint: session.ipFingerprint || null,
-            })) {
-                try { await fsPromises.unlink(req.file.path); } catch {}
+            const resolved = await resolveAuthorizedSession({ uploadId, token: uploadToken });
+            if (!resolved.session) {
+                if (resolved.status === 409 && resolved.error === 'Sesión de subida cancelada') {
+                    await cleanupUploadArtifacts(uploadPath, req.file.path);
+                } else {
+                    try { await fsPromises.unlink(req.file.path); } catch {}
+                }
                 metrics.increment('upload_chunk_client_error', 1);
-                return res.status(403).json({ error: 'No autorizado para esta sesión de subida' });
+                return res.status(resolved.status).json({ error: resolved.error });
             }
-            if (session.status === 'cancelled' || session.status === 'completed') {
-                try { await fsPromises.unlink(req.file.path); } catch {}
-                metrics.increment('upload_chunk_client_error', 1);
-                return res.status(409).json({ error: 'Sesión de subida no disponible' });
-            }
-            if (Date.now() - session.createdAt > maxUploadAgeMs) {
-                try { await fsPromises.unlink(req.file.path); } catch {}
-                metrics.increment('upload_chunk_client_error', 1);
-                return res.status(410).json({ error: 'Sesión de subida expirada' });
-            }
+            const session = resolved.session;
 
             // Enforce in-progress quota per user/IP
             if (typeof getUploadLimits === 'function') {
@@ -297,6 +347,7 @@ export const createChunkRouter = (options) => {
             try { await fsPromises.unlink(req.file.path); } catch {}
             
             if (err.code === 'ENOENT') {
+                await cleanupUploadArtifacts(uploadPath);
                 logger.warn('Upload session not found', { uploadId: uploadId.substring(0, 8) + '...', chunkIndex });
                 return res.status(404).json({ error: 'Sesión de subida no encontrada' });
             }

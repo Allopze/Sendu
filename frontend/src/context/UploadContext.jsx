@@ -453,10 +453,6 @@ export const UploadProvider = ({ children }) => {
     }, []);
 
     const cancelUpload = useCallback(async () => {
-        if (abortControllerRef.current) {
-            abortControllerRef.current.abort();
-            abortControllerRef.current = null;
-        }
         if (archiveWorkerRef.current) {
             archiveWorkerRef.current.postMessage({ type: 'cancel' });
             archiveWorkerRef.current.terminate();
@@ -470,6 +466,10 @@ export const UploadProvider = ({ children }) => {
                 // Ignore errors during cleanup
             }
             await clearPersistedUpload(activeUploadId);
+        }
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+            abortControllerRef.current = null;
         }
         uploadIdRef.current = null;
         uploadTokenRef.current = null;

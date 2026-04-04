@@ -98,6 +98,7 @@ Hay un ejemplo en nginx.conf.example. Asegura que el proxy preserve cabeceras, y
 - uploads/: archivos subidos.
 - branding/: logos y favicon.
 - backend/logs/: logs de aplicación.
+- En el release Docker prebuilt estas rutas quedan persistidas por defecto en la misma carpeta del despliegue mediante bind mounts (`./data`, `./uploads`, `./branding`, `./backend/logs`).
 
 ## Health checks
 

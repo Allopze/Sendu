@@ -593,8 +593,10 @@ export const registerUploadRoutes = ({
         const uploadPath = pathModule.join(CHUNKS_DIR, uploadId);
 
         try {
-            await fsPromises.rm(uploadPath, { recursive: true, force: true });
+            // Mark the session as cancelled first so in-flight chunk requests
+            // stop accepting new data before we remove the chunk directory.
             await markUploadSessionCancelled(uploadId);
+            await fsPromises.rm(uploadPath, { recursive: true, force: true });
             logger.info('Upload cancelled and cleaned up', { uploadId });
             metrics.increment('upload_cancel', 1);
             res.json({ message: 'Subida cancelada' });

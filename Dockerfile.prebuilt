@@ -9,9 +9,8 @@ WORKDIR /app
 # Install build dependencies for native modules (better-sqlite3)
 RUN apk add --no-cache python3 make g++
 
-# Create non-root user for security
-RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 sendu
+# Use the built-in 'node' user (UID 1000, GID 1000) for host volume compatibility
+# node:20-alpine already provides user 'node' with UID/GID 1000
 
 # Copy all files (already pre-built)
 COPY package*.json ./
@@ -28,10 +27,10 @@ RUN apk del python3 make g++
 
 # Create directories for data persistence
 RUN mkdir -p /app/uploads /app/tmp /app/backend/logs /app/data /app/branding && \
-    chown -R sendu:nodejs /app
+    chown -R node:node /app
 
 # Switch to non-root user
-USER sendu
+USER node
 
 # Environment variables
 ENV NODE_ENV=production

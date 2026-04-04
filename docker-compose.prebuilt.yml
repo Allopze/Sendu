@@ -15,6 +15,8 @@ services:
       - PORT=${PORT:-4000}
       - SESSION_SECRET=${SESSION_SECRET:?SESSION_SECRET is required}
       - PUBLIC_ORIGIN=${PUBLIC_ORIGIN:?PUBLIC_ORIGIN is required}
+      - ALLOW_PUBLIC_REGISTRATION=${ALLOW_PUBLIC_REGISTRATION:-false}
+      - ADMIN_BOOTSTRAP_TOKEN=${ADMIN_BOOTSTRAP_TOKEN:-}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
       - SESSION_COOKIE_DOMAIN=${SESSION_COOKIE_DOMAIN:-}
       - SESSION_COOKIE_SAMESITE=${SESSION_COOKIE_SAMESITE:-lax}
@@ -28,10 +30,10 @@ services:
       - SMTP_FROM=${SMTP_FROM:-}
       - SESSION_COOKIE_NAME=${SESSION_COOKIE_NAME:-sendu.sid}
     volumes:
-      - sendu-data:/app/data
-      - sendu-uploads:/app/uploads
-      - sendu-logs:/app/backend/logs
-      - sendu-branding:/app/branding
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+      - ./backend/logs:/app/backend/logs
+      - ./branding:/app/branding
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:${PORT:-4000}/api/health/ready"]
       interval: 30s
@@ -44,11 +46,5 @@ services:
     cpus: "1.0"
     read_only: true
     tmpfs:
-      - /tmp:size=64m,uid=1001,gid=1001
-      - /app/tmp:size=256m,uid=1001,gid=1001
-
-volumes:
-  sendu-data:
-  sendu-uploads:
-  sendu-logs:
-  sendu-branding:
+      - /tmp:size=64m,uid=1000,gid=1000
+      - /app/tmp:size=256m,uid=1000,gid=1000

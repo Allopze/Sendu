@@ -397,6 +397,51 @@ describe('Negative tests — upload/download edge cases', () => {
             // Both are correct defenses against completing a cancelled upload.
             expect([403, 404]).toContain(completeRes.status);
         });
+
+        it('should delete chunk artifacts immediately after cancellation and refuse new chunks', async () => {
+            const content = Buffer.from('cancel-cleanup-check');
+            const agent = request.agent(app);
+            const csrfRes = await agent.get('/api/auth/me');
+            let csrfToken = extractCsrfToken(csrfRes);
+
+            const initRes = await agent
+                .post('/api/upload/init')
+                .set('x-csrf-token', csrfToken)
+                .send({
+                    originalName: 'cancel-cleanup.txt',
+                    size: content.length,
+                    mimeType: 'text/plain',
+                    totalChunks: 1,
+                });
+
+            csrfToken = extractCsrfToken(initRes) || csrfToken;
+            const uploadId = initRes.body.uploadId;
+            const uploadToken = initRes.body.uploadToken;
+            const uploadPath = path.join(uploadsDir, 'chunks', uploadId);
+
+            await agent
+                .post(`/api/upload/chunk?uploadId=${uploadId}&index=0`)
+                .set('x-upload-token', uploadToken)
+                .attach('chunk', content, 'cancel-cleanup.txt');
+
+            expect(fs.existsSync(uploadPath)).toBe(true);
+
+            const cancelRes = await agent
+                .post('/api/upload/cancel')
+                .set('x-csrf-token', csrfToken)
+                .send({ uploadId });
+
+            expect(cancelRes.status).toBe(200);
+            expect(fs.existsSync(uploadPath)).toBe(false);
+
+            const retryChunkRes = await agent
+                .post(`/api/upload/chunk?uploadId=${uploadId}&index=0`)
+                .set('x-upload-token', uploadToken)
+                .attach('chunk', content, 'cancel-cleanup.txt');
+
+            expect([404, 409]).toContain(retryChunkRes.status);
+            expect(fs.existsSync(uploadPath)).toBe(false);
+        });
     });
 
     // ── Download edge cases ─────────────────────────────────────

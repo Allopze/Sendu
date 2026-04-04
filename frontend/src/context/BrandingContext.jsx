@@ -84,7 +84,7 @@ export const BrandingProvider = ({ children }) => {
         if (newSettings.favicon !== undefined) {
             const link = document.querySelector("link[rel~='icon']") || document.createElement('link');
             link.rel = 'icon';
-            link.href = newSettings.favicon || '/favicon.svg';
+            link.href = newSettings.favicon || '/branding/favicon.png';
             document.head.appendChild(link);
         }
     }, []);

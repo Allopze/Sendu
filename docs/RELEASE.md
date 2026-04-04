@@ -39,6 +39,9 @@ Pasos básicos:
 docker compose -f docker-compose.prebuilt.yml --env-file .env up -d --build
 ```
 
+El compose prebuilt persiste `data/`, `uploads/`, `branding/` y `backend/logs/`
+en la carpeta del release por defecto.
+
 ## Versionado
 
 Se usa el campo version de package.json. Actualiza antes de crear un release.
