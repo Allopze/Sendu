@@ -1,4 +1,4 @@
-# Sendu v2
+# Sendu
 
 Plataforma de intercambio de archivos con subidas en chunks, enlaces protegidos, expiración, panel de administración y branding. Backend en Node.js/Express y frontend en React (Vite).
 
