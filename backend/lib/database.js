@@ -13,6 +13,31 @@ import path from 'path';
 let dbInstance = null;
 let dbPath = null;
 
+function formatDirDiagnostic(dir) {
+    const summary = {
+        path: dir,
+        exists: fs.existsSync(dir),
+        writable: false,
+    };
+
+    if (!summary.exists) {
+        return summary;
+    }
+
+    try {
+        const stats = fs.statSync(dir);
+        summary.mode = `0${(stats.mode & 0o777).toString(8)}`;
+        summary.owner = `${stats.uid}:${stats.gid}`;
+    } catch {}
+
+    try {
+        fs.accessSync(dir, fs.constants.R_OK | fs.constants.W_OK);
+        summary.writable = true;
+    } catch {}
+
+    return summary;
+}
+
 /**
  * Initialize the database
  * @param {string} filePath - Path to the SQLite database file
@@ -31,7 +56,25 @@ export async function initDatabase(filePath) {
         fs.mkdirSync(dir, { recursive: true });
     }
 
-    dbInstance = new Database(filePath);
+    try {
+        fs.accessSync(dir, fs.constants.R_OK | fs.constants.W_OK);
+    } catch (error) {
+        const diagnostic = formatDirDiagnostic(dir);
+        throw new Error(
+            `Database directory is not writable for SQLite: ${JSON.stringify(diagnostic)} (${error.message})`,
+            { cause: error }
+        );
+    }
+
+    try {
+        dbInstance = new Database(filePath);
+    } catch (error) {
+        const diagnostic = formatDirDiagnostic(dir);
+        throw new Error(
+            `Failed to open SQLite database at ${filePath}: ${JSON.stringify(diagnostic)} (${error.message})`,
+            { cause: error }
+        );
+    }
 
     // Recommended pragmas for durability/perf balance
     dbInstance.pragma('journal_mode = WAL');

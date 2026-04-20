@@ -22,6 +22,7 @@ cp .env.example .env
 - Usa un único `PUBLIC_ORIGIN` válido, sin slash final.
 - Ajusta `ALLOWED_ORIGINS` como lista separada por comas solo si realmente necesitas más de un origen.
 - Si la máquina ya usa `3000`, define `HOST_PORT=3301` o cualquier puerto libre para publicar el contenedor sin tocar el puerto interno de la app.
+- Si el host usa un UID/GID distinto de `1000`, define `PUID` y `PGID` con `id -u` y `id -g` para que los bind mounts (`data/`, `uploads/`, `backend/logs/`, `branding/`) queden escribibles desde el contenedor.
 
 Si necesitas correo transaccional desde el arranque, define también `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` y `SMTP_FROM`. Luego podrás sobrescribirlos desde el panel Admin si hace falta.
 

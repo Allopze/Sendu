@@ -3,6 +3,7 @@ const DB_VERSION = 1;
 const STORE_NAME = 'uploads';
 const CACHE_NAME = 'sendu-upload-persistence-cache';
 const OPFS_DIR_NAME = 'sendu-upload-persistence';
+const LARGE_UPLOAD_FALLBACK_LIMIT_BYTES = 256 * 1024 * 1024;
 
 const getCacheKey = (uploadId) => `/__sendu_upload_persistence__/${uploadId}`;
 const getOpfsDataName = (uploadId) => `${uploadId}.bin`;
@@ -20,6 +21,18 @@ const isArchiveEntriesPayload = (entries) => (
     && entries.length > 0
     && entries.every((entry) => entry && typeof entry.path === 'string' && entry.file instanceof Blob)
 );
+
+const getPersistencePayloadBytes = ({ file, entries }) => {
+    if (file instanceof Blob) {
+        return file.size || 0;
+    }
+
+    if (isArchiveEntriesPayload(entries)) {
+        return entries.reduce((total, entry) => total + (entry.file?.size || 0), 0);
+    }
+
+    return 0;
+};
 
 const canUseOpfs = () => (
     typeof navigator !== 'undefined'
@@ -444,16 +457,36 @@ export const savePersistedUpload = async ({ uploadId, file, entries, state }) =>
     if (!uploadId || (!file && !isArchiveEntriesPayload(entries))) return false;
 
     const payload = { uploadId, file, entries, state };
+    const payloadBytes = getPersistencePayloadBytes(payload);
+    const strategies = [
+        () => (
+            isArchiveEntriesPayload(entries)
+                ? savePersistedArchiveToOpfs({ uploadId, entries, state })
+                : savePersistedUploadToOpfs(payload)
+        )
+    ];
 
-    const results = await Promise.allSettled([
-        isArchiveEntriesPayload(entries)
-            ? savePersistedArchiveToOpfs({ uploadId, entries, state })
-            : savePersistedUploadToOpfs(payload),
-        savePersistedUploadToIndexedDb(payload),
-        savePersistedUploadToCache(payload)
-    ]);
+    // Avoid cloning large uploads into multiple browser storage backends. For
+    // large payloads we persist only to OPFS; otherwise we try smaller
+    // fallbacks one by one instead of writing the same file three times.
+    if (payloadBytes > 0 && payloadBytes <= LARGE_UPLOAD_FALLBACK_LIMIT_BYTES) {
+        strategies.push(
+            () => savePersistedUploadToIndexedDb(payload),
+            () => savePersistedUploadToCache(payload)
+        );
+    }
 
-    return results.some((result) => result.status === 'fulfilled' && result.value === true);
+    for (const persist of strategies) {
+        try {
+            if (await persist()) {
+                return true;
+            }
+        } catch {
+            // Try the next available backend.
+        }
+    }
+
+    return false;
 };
 
 export const getPersistedUpload = async (uploadId) => {
